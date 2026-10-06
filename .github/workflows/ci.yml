@@ -1,0 +1,103 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # ⛔ A WORKFLOW THAT FAILS TO PARSE REPORTS NOTHING AT ALL — no red cross,
+  # no jobs, and the check list stays EMPTY, which reads exactly like a check
+  # that has not started yet. That is the very confusion this tool exists to
+  # refuse, so the repository had better not be the one producing it.
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+  test:
+    name: build + vet + test
+    strategy:
+      fail-fast: false
+      matrix:
+        # This tool spawns a process and reads its output — behaviour that
+        # differs by operating system, and the one place a "works here"
+        # would be least surprising and most wrong. The helper-process test
+        # is here precisely so Windows is not an exception.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # ⛔ bash ON EVERY LANE, not per step: GitHub's default shell on Windows
+    # is PowerShell, where an inline VAR=value prefix is a syntax error
+    # rather than an assignment.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      # ⛔ SAY WHICH TOOLCHAIN RAN. A green check that does not record the
+      # compiler behind it makes every figure measured under it
+      # unattributable.
+      - run: go version
+      - name: gofmt
+        run: |
+          drift=$(gofmt -l .)
+          if [ -n "$drift" ]; then echo "::error::not gofmt-clean:"; echo "$drift"; exit 1; fi
+      - name: build
+        run: CGO_ENABLED=0 go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race -timeout 5m ./...
+
+  # The unit tests reach every rule without a network. This job is the other
+  # half: the real gh, real authentication, a real pull request. It picks an
+  # ALREADY MERGED one so it settles immediately instead of waiting for a
+  # suite — and a merged pull request is itself one of the rules.
+  selfcheck:
+    name: it answers about a real pull request
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build
+        run: go build -o /tmp/prwait .
+      - name: a merged pull request settles at once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          n=$(gh pr list --repo go-fleettools/mutate --state merged --limit 1 --json number --jq '.[0].number')
+          if [ -z "$n" ]; then echo "::notice::no merged pull request to try"; exit 0; fi
+          /tmp/prwait -repo go-fleettools/mutate -timeout 10s "$n"
+      - name: an empty check list is refused, not accepted
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # -min-checks 0 would restore the defect this tool exists for, so
+          # it must be refused with status 2 rather than quietly honoured.
+          # Captured into a variable: asserting merely that it failed cannot
+          # tell a refusal from a red pull request, and those want opposite
+          # reactions.
+          status=0
+          /tmp/prwait -repo go-fleettools/mutate -min-checks 0 1 || status=$?
+          if [ "$status" -ne 2 ]; then
+            echo "::error::-min-checks 0 exited $status, want 2"; exit 1
+          fi
