@@ -1,0 +1,18 @@
+# Go source is LF everywhere, a Windows checkout included.
+#
+# Without this the windows-latest lane fails on EVERY file and says nothing
+# whatever about the code:
+#
+#   ##[error]not gofmt-clean:
+#   main.go
+#   main_test.go
+#
+# `actions/checkout` honours git's core.autocrlf, which is true on the
+# Windows runners, so the working tree arrives with CRLF. `gofmt -l` reports
+# a CRLF file as unformatted and does not negotiate. The two are each
+# behaving correctly; the repository has to say which it wants.
+#
+# Said for the whole tree rather than for *.go alone: the workflow's `run:`
+# blocks are bash, and a CRLF heredoc inside one fails in ways that read as
+# a shell bug.
+* text=auto eol=lf
