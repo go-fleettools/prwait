@@ -56,8 +56,14 @@ jobs:
         run: |
           drift=$(gofmt -l .)
           if [ -n "$drift" ]; then echo "::error::not gofmt-clean:"; echo "$drift"; exit 1; fi
+      # ⛔ BUILD OUT OF THE TREE. A bare `go build ./...` drops the binary
+      # beside the source, where the next `git add -A` would commit it —
+      # which is how go-fleettools/fleettools v0.1.0 came to ship 8.4 MB of
+      # executables. TestNoExecutableIsCommitted asks git what is TRACKED,
+      # so an artefact here would not fail it; it would merely sit there
+      # waiting for someone careless.
       - name: build
-        run: CGO_ENABLED=0 go build ./...
+        run: CGO_ENABLED=0 go build -o "$RUNNER_TEMP/" ./...
       - name: vet
         run: go vet ./...
       - name: test
