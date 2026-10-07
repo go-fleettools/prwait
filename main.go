@@ -162,6 +162,33 @@ func assess(p pr, minChecks int) (verdict, string) {
 		return failed, "CONFLICTING — rebase it; any green ticks it shows are from the old base"
 	}
 	if len(p.Rollup) < minChecks {
+		// AND SAY WHEN WAITING IS HOPELESS WITHOUT GIVING UP ON IT.
+		//
+		// -min-checks is one number for a whole run, so a single command
+		// covering repositories with different suites gets the biggest
+		// repository's threshold applied to the smallest. Observed: a run
+		// over four Go repositories (20+ lanes each) and one docs
+		// repository (2) with -min-checks 20. The docs pull request was
+		// finished and green and the waiter sat on it until the timeout,
+		// repeating "2 checks, want at least 20" without ever saying that
+		// those 2 were DONE.
+		//
+		// It still waits — a threshold that gave up would be a threshold
+		// that passes an incomplete list, which is the whole defect this
+		// tool exists for. But the reason now distinguishes "more are
+		// coming" from "this is all there will ever be", and names the
+		// flag, because the fix is to split the run and only the caller
+		// can do that.
+		done := 0
+		for _, e := range p.Rollup {
+			if e.done() {
+				done++
+			}
+		}
+		if len(p.Rollup) > 0 && done == len(p.Rollup) {
+			return waiting, fmt.Sprintf("%d checks, all finished, want at least %d — is -min-checks meant for this repository?",
+				len(p.Rollup), minChecks)
+		}
 		return waiting, fmt.Sprintf("%d checks, want at least %d", len(p.Rollup), minChecks)
 	}
 	var pending []string

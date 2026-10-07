@@ -88,6 +88,20 @@ span repositories — which is what a dependency bump across a family of modules
 reports 1 has registered one workflow so far, and stopping there is the partial-list race.
 `-min-checks 0` is refused, because it would restore the defect this tool exists for.
 
+**It is one number for the whole run.** A single command spanning repositories with
+different suites applies the biggest one's threshold to the smallest — four Go repositories
+at 20+ lanes and one docs repository at 2, under `-min-checks 20`, leaves the docs pull
+request finished, green and waited on until the timeout. So **split the run** when the
+suites differ. The waiter still refuses to pass a short list, but it now says which
+situation you are in:
+
+```console
+go-pkgx/docs#23 … 2 checks, all finished, want at least 20 — is -min-checks meant for this repository?
+```
+
+"More are coming" and "this is all there will ever be" are different, and only the caller
+can act on the second.
+
 ## Tests
 
 Every rule is a pure function of one observation, so the suite runs without a network and
