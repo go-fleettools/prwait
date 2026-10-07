@@ -400,3 +400,81 @@ func TestAThresholdMeantForAnotherRepositoryIsSaidOutLoud(t *testing.T) {
 		t.Errorf("a list with a running check was called finished: %q", why)
 	}
 }
+
+// A FETCH ERROR IS OFTEN WEATHER. Observed in one 25-minute wait: an HTTP
+// 401 from GitHub, then minutes later `fork/exec: resource temporarily
+// unavailable` because a peer session had the machine at load 576. Neither
+// says anything about the pull request, and both used to kill the run.
+func TestATransientQueryFailureIsRetried(t *testing.T) {
+	calls := 0
+	w := testWaiter(func(string, int) (pr, error) {
+		calls++
+		if calls <= 2 {
+			return pr{}, errors.New("fork/exec gh: resource temporarily unavailable")
+		}
+		return pr{Mergeable: "MERGEABLE", Rollup: []entry{
+			{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+		}}, nil
+	})
+	out := &strings.Builder{}
+	w.out = out
+	if !w.wait([]pr{{Repo: "a/b", Number: 1}}) {
+		t.Fatalf("two blips sank the run: %s", out)
+	}
+	// AND IT SAYS SO. A retry nobody can see is indistinguishable from a
+	// waiter that is simply slow.
+	if !strings.Contains(out.String(), "asking again") {
+		t.Errorf("the retries were silent: %q", out)
+	}
+}
+
+// BUT IT IS STILL NEVER A PASS. Errors that do not stop are a wall, not
+// weather, and waiting them out in silence is the failure this tool exists
+// to refuse.
+func TestPersistentQueryFailureStillFails(t *testing.T) {
+	calls := 0
+	w := testWaiter(func(string, int) (pr, error) {
+		calls++
+		return pr{}, errors.New("gh: not authenticated")
+	})
+	out := &strings.Builder{}
+	w.out = out
+	if w.wait([]pr{{Repo: "a/b", Number: 1}}) {
+		t.Fatal("a query that never succeeded was reported as a pass")
+	}
+	if calls > 5 {
+		// A LITERAL, not fetchRetries. Comparing the behaviour to the very
+		// constant that governs it is a witness that cannot see the constant
+		// change: mutate set fetchRetries to 1000 and this test, reading
+		// fetchRetries, agreed with it and passed. The bound here is a
+		// judgement — "a handful, not a hundred" — and it has to be written
+		// down independently or it is not asserted at all.
+		t.Errorf("asked %d times before giving up; a transient-error retry must not become a wait", calls)
+	}
+	if !strings.Contains(out.String(), "not authenticated") {
+		t.Errorf("the reason was swallowed: %q", out)
+	}
+}
+
+// CONSECUTIVE, NOT CUMULATIVE: a blip, then success, then another blip is
+// weather twice over and must not add up to a wall.
+func TestTheRetryCounterResetsOnSuccess(t *testing.T) {
+	calls := 0
+	w := testWaiter(func(string, int) (pr, error) {
+		calls++
+		switch calls {
+		case 1, 3, 5:
+			return pr{}, errors.New("blip")
+		case 2, 4:
+			return pr{Mergeable: "MERGEABLE", Rollup: []entry{{Name: "test", Status: "QUEUED"}}}, nil
+		}
+		return pr{Mergeable: "MERGEABLE", Rollup: []entry{
+			{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+		}}, nil
+	})
+	out := &strings.Builder{}
+	w.out = out
+	if !w.wait([]pr{{Repo: "a/b", Number: 1}}) {
+		t.Fatalf("three separated blips sank the run: %s", out)
+	}
+}
