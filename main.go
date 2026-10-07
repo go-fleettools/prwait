@@ -312,15 +312,39 @@ func (w waiter) wait(refs []pr) bool {
 	left := make([]pr, len(refs))
 	copy(left, refs)
 	allOK := true
+	// A FETCH ERROR IS OFTEN WEATHER, NOT AN ANSWER.
+	//
+	// Observed in one 25-minute wait: GitHub answered HTTP 401 once, and
+	// minutes later the machine could not fork at all —
+	//
+	//	gh pr view …: HTTP 401: Requires authentication
+	//	fork/exec /usr/local/bin/gh: resource temporarily unavailable
+	//
+	// — the second because a peer session had the machine at load 576.
+	// Neither says anything about the pull request, and both killed the
+	// whole wait, which then had to be restarted by hand.
+	//
+	// So a failed query is RETRIED, up to a few times in a row, and only
+	// then gives up on that pull request. It is still never a pass: the
+	// run fails if the errors do not stop. Consecutive, not cumulative —
+	// a blip an hour apart is weather, three in a row is a wall.
+	fails := map[string]int{}
 	for len(left) > 0 {
 		var still []pr
 		for _, p := range left {
 			got, err := w.fetch(p.Repo, p.Number)
 			if err != nil {
+				fails[p.String()]++
+				if n := fails[p.String()]; n < fetchRetries && w.now().Sub(start) < w.timeout {
+					fmt.Fprintf(w.out, "%s asking again (%d/%d): %v\n", p, n, fetchRetries, err)
+					still = append(still, p)
+					continue
+				}
 				fmt.Fprintf(w.out, "%s %v\n", p, err)
 				allOK = false
 				continue
 			}
+			fails[p.String()] = 0
 			got.Repo, got.Number = p.Repo, p.Number
 			switch v, why := assess(got, w.minChecks); v {
 			case passed:
@@ -391,3 +415,9 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// fetchRetries is how many times in a row a query may fail before the
+// pull request is given up on. Three, at the poll interval, is about two
+// minutes of weather — long enough for an API blip or a loaded machine,
+// short enough that a genuinely broken setup is not waited out in silence.
+const fetchRetries = 3
