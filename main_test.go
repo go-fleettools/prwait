@@ -365,3 +365,38 @@ func jsonName(args string) (string, error) {
 	})
 	return string(b), err
 }
+
+// A THRESHOLD MEANT FOR ANOTHER REPOSITORY, which is what one -min-checks
+// across a whole run produces. Observed: four Go repositories with 20+
+// lanes each and one docs repository with 2, under -min-checks 20. The docs
+// pull request was finished and green, and the waiter sat on it to the
+// timeout repeating "2 checks, want at least 20" without ever saying those
+// 2 were DONE.
+//
+// It must still WAIT — a threshold that gave up would be a threshold that
+// passes an incomplete list, which is the defect this tool exists for. What
+// changes is the reason: "more are coming" and "this is all there will ever
+// be" are different situations and only the caller can act on the second.
+func TestAThresholdMeantForAnotherRepositoryIsSaidOutLoud(t *testing.T) {
+	complete := pr{Mergeable: "MERGEABLE", Rollup: []entry{
+		{Name: "docs", Status: "COMPLETED", Conclusion: "SUCCESS"},
+		{Name: "links", Status: "COMPLETED", Conclusion: "SKIPPED"},
+	}}
+	v, why := assess(complete, 20)
+	if v != waiting {
+		t.Fatalf("a short-but-complete list gave %v, want waiting — the threshold must hold", v)
+	}
+	if !strings.Contains(why, "all finished") || !strings.Contains(why, "-min-checks") {
+		t.Errorf("the reason does not distinguish a finished list from a growing one: %q", why)
+	}
+
+	// AND THE ORDINARY CASE KEEPS THE ORDINARY REASON: with something still
+	// running, more really are coming and the hint would be wrong.
+	growing := pr{Mergeable: "MERGEABLE", Rollup: []entry{
+		{Name: "docs", Status: "COMPLETED", Conclusion: "SUCCESS"},
+		{Name: "build", Status: "IN_PROGRESS"},
+	}}
+	if _, why := assess(growing, 20); strings.Contains(why, "all finished") {
+		t.Errorf("a list with a running check was called finished: %q", why)
+	}
+}
