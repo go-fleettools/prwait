@@ -140,12 +140,13 @@ func TestAClosedOrMergedPullRequestSettlesAtOnce(t *testing.T) {
 	}
 }
 
-func TestParseRef(t *testing.T) {
+func TestParseTarget(t *testing.T) {
 	for _, c := range []struct {
-		arg, def, repo string
-		num            int
-		bad            bool
+		arg, def, repo, branch string
+		num                    int
+		bad                    bool
 	}{
+		// pull requests, unchanged
 		{arg: "82", def: "go-pkgx/pkgx", repo: "go-pkgx/pkgx", num: 82},
 		{arg: "go-pkgx/bk#311", def: "", repo: "go-pkgx/bk", num: 311},
 		{arg: "go-pkgx/bk#311", def: "other/other", repo: "go-pkgx/bk", num: 311},
@@ -155,21 +156,55 @@ func TestParseRef(t *testing.T) {
 		{arg: "-3", def: "a/b", bad: true},
 		{arg: "a/b/c#1", def: "", bad: true},
 		{arg: "b#1", def: "", bad: true},
+
+		// branches, which always carry the @
+		{arg: "@main", def: "a/b", repo: "a/b", branch: "main"},
+		{arg: "a/b@main", def: "", repo: "a/b", branch: "main"},
+		{arg: "a/b@main", def: "other/other", repo: "a/b", branch: "main"},
+		{arg: "@release/1.2", def: "a/b", repo: "a/b", branch: "release/1.2"},
+		{arg: "@main", def: "", bad: true}, // no repository anywhere
+		{arg: "a/b@", def: "", bad: true},  // nothing after the @
+		{arg: "a/b/c@main", def: "", bad: true},
 	} {
-		repo, num, err := parseRef(c.arg, c.def)
+		got, err := parseTarget(c.arg, c.def)
 		if c.bad {
 			if err == nil {
-				t.Errorf("parseRef(%q, %q) = %s#%d, want an error", c.arg, c.def, repo, num)
+				t.Errorf("parseTarget(%q, %q) = %s, want an error", c.arg, c.def, got)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("parseRef(%q, %q): %v", c.arg, c.def, err)
+			t.Errorf("parseTarget(%q, %q): %v", c.arg, c.def, err)
 			continue
 		}
-		if repo != c.repo || num != c.num {
-			t.Errorf("parseRef(%q, %q) = %s#%d, want %s#%d", c.arg, c.def, repo, num, c.repo, c.num)
+		if got.Repo != c.repo || got.Number != c.num || got.Branch != c.branch {
+			t.Errorf("parseTarget(%q, %q) = {repo:%s num:%d branch:%s}, want {repo:%s num:%d branch:%s}",
+				c.arg, c.def, got.Repo, got.Number, got.Branch, c.repo, c.num, c.branch)
 		}
+	}
+}
+
+// A mistyped pull request number must stay an error rather than becoming a
+// wait on a branch nobody named -- which is why the @ is required, and the
+// message says so.
+func TestAMistypedNumberIsNotTakenForABranch(t *testing.T) {
+	_, err := parseTarget("8two", "a/b")
+	if err == nil {
+		t.Fatal(`parseTarget("8two") was accepted; it has to be refused`)
+	}
+	if !strings.Contains(err.Error(), "@8two") {
+		t.Errorf("the error does not say how to ask for a branch: %v", err)
+	}
+}
+
+// A branch and a pull request print differently, because a log line saying
+// which one was waited on is the only record afterwards.
+func TestATargetSaysWhichKindItIs(t *testing.T) {
+	if got := (pr{Repo: "a/b", Number: 7}).String(); got != "a/b#7" {
+		t.Errorf("pull request prints %q", got)
+	}
+	if got := (pr{Repo: "a/b", Branch: "main"}).String(); got != "a/b@main" {
+		t.Errorf("branch prints %q", got)
 	}
 }
 
@@ -177,7 +212,7 @@ func TestParseRef(t *testing.T) {
 // and stop the moment it is.
 func TestTheWaiterPollsUntilItSettles(t *testing.T) {
 	calls := 0
-	w := testWaiter(func(repo string, num int) (pr, error) {
+	w := testWaiter(func(pr) (pr, error) {
 		calls++
 		if calls < 3 {
 			return pr{Mergeable: "MERGEABLE", Rollup: []entry{{Name: "test", Status: "IN_PROGRESS"}}}, nil
@@ -201,7 +236,7 @@ func TestTheWaiterPollsUntilItSettles(t *testing.T) {
 // and not as a hang: the timeout is an answer about the pull request.
 func TestATimeoutIsAFailure(t *testing.T) {
 	now := time.Unix(0, 0)
-	w := testWaiter(func(string, int) (pr, error) {
+	w := testWaiter(func(pr) (pr, error) {
 		return pr{Mergeable: "MERGEABLE", Rollup: []entry{{Name: "test", Status: "QUEUED"}}}, nil
 	})
 	w.now = func() time.Time { return now }
@@ -221,9 +256,9 @@ func TestATimeoutIsAFailure(t *testing.T) {
 // One red pull request among several must sink the whole run, and the
 // others must still be reported rather than abandoned.
 func TestOneFailureSinksTheRunAndTheRestAreStillReported(t *testing.T) {
-	w := testWaiter(func(repo string, num int) (pr, error) {
+	w := testWaiter(func(target pr) (pr, error) {
 		c := "SUCCESS"
-		if num == 2 {
+		if target.Number == 2 {
 			c = "FAILURE"
 		}
 		return pr{Mergeable: "MERGEABLE", Rollup: []entry{{Name: "test", Status: "COMPLETED", Conclusion: c}}}, nil
@@ -242,7 +277,7 @@ func TestOneFailureSinksTheRunAndTheRestAreStillReported(t *testing.T) {
 
 // AN ERROR FROM gh IS NOT A PASS EITHER — not a wait, and not silence.
 func TestAFetchErrorIsReportedAndFails(t *testing.T) {
-	w := testWaiter(func(string, int) (pr, error) { return pr{}, errors.New("gh: not authenticated") })
+	w := testWaiter(func(pr) (pr, error) { return pr{}, errors.New("gh: not authenticated") })
 	out := &strings.Builder{}
 	w.out = out
 	if w.wait([]pr{{Repo: "a/b", Number: 1}}) {
@@ -270,7 +305,7 @@ func TestDecodeReadsGhsShape(t *testing.T) {
 	const body = `{"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":[
 	  {"__typename":"CheckRun","name":"build + vet + test (ubuntu-latest)","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"ci"},
 	  {"__typename":"StatusContext","context":"license/cla","state":"SUCCESS"}]}`
-	p, err := decode([]byte(body), "a/b", 7)
+	p, err := decode([]byte(body), pr{Repo: "a/b", Number: 7})
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -283,7 +318,7 @@ func TestDecodeReadsGhsShape(t *testing.T) {
 }
 
 func TestDecodeRefusesNonsense(t *testing.T) {
-	if _, err := decode([]byte("not json"), "a/b", 7); err == nil {
+	if _, err := decode([]byte("not json"), pr{Repo: "a/b", Number: 7}); err == nil {
 		t.Fatal("garbage decoded without complaint")
 	}
 }
@@ -297,7 +332,7 @@ func TestDecodeRefusesNonsense(t *testing.T) {
 func TestGhFetcherRunsTheBinaryAndReadsItsOutput(t *testing.T) {
 	f := ghFetcher(os.Args[0])
 	t.Setenv("PRWAIT_HELPER", "1")
-	p, err := f("go-pkgx/pkgx", 82)
+	p, err := f(pr{Repo: "go-pkgx/pkgx", Number: 82})
 	if err != nil {
 		t.Fatalf("ghFetcher: %v", err)
 	}
@@ -315,7 +350,7 @@ func TestGhFetcherRunsTheBinaryAndReadsItsOutput(t *testing.T) {
 func TestGhFetcherReportsAFailingBinary(t *testing.T) {
 	f := ghFetcher(os.Args[0])
 	t.Setenv("PRWAIT_HELPER", "fail")
-	_, err := f("a/b", 1)
+	_, err := f(pr{Repo: "a/b", Number: 1})
 	if err == nil {
 		t.Fatal("a gh that exited non-zero was not reported")
 	}
@@ -407,7 +442,7 @@ func TestAThresholdMeantForAnotherRepositoryIsSaidOutLoud(t *testing.T) {
 // says anything about the pull request, and both used to kill the run.
 func TestATransientQueryFailureIsRetried(t *testing.T) {
 	calls := 0
-	w := testWaiter(func(string, int) (pr, error) {
+	w := testWaiter(func(pr) (pr, error) {
 		calls++
 		if calls <= 2 {
 			return pr{}, errors.New("fork/exec gh: resource temporarily unavailable")
@@ -433,7 +468,7 @@ func TestATransientQueryFailureIsRetried(t *testing.T) {
 // to refuse.
 func TestPersistentQueryFailureStillFails(t *testing.T) {
 	calls := 0
-	w := testWaiter(func(string, int) (pr, error) {
+	w := testWaiter(func(pr) (pr, error) {
 		calls++
 		return pr{}, errors.New("gh: not authenticated")
 	})
@@ -460,7 +495,7 @@ func TestPersistentQueryFailureStillFails(t *testing.T) {
 // weather twice over and must not add up to a wall.
 func TestTheRetryCounterResetsOnSuccess(t *testing.T) {
 	calls := 0
-	w := testWaiter(func(string, int) (pr, error) {
+	w := testWaiter(func(pr) (pr, error) {
 		calls++
 		switch calls {
 		case 1, 3, 5:
@@ -476,5 +511,84 @@ func TestTheRetryCounterResetsOnSuccess(t *testing.T) {
 	w.out = out
 	if !w.wait([]pr{{Repo: "a/b", Number: 1}}) {
 		t.Fatalf("three separated blips sank the run: %s", out)
+	}
+}
+
+// TestGhFetcherAsksForABranchThroughGraphQL: the branch path must call gh with
+// the graphql query AND the --jq that reshapes the answer, because the whole
+// reason it can reuse assess unchanged is that gh hands back the same object
+// `gh pr view` does. A lost --jq would produce a valid-looking answer with an
+// empty rollup, which -min-checks would catch but only as "0 checks" -- so the
+// argv is asserted here, where the cause is visible.
+func TestGhFetcherAsksForABranchThroughGraphQL(t *testing.T) {
+	f := ghFetcher(os.Args[0])
+	t.Setenv("PRWAIT_HELPER", "1")
+	p, err := f(pr{Repo: "go-pkgx/pkgx", Branch: "main"})
+	if err != nil {
+		t.Fatalf("ghFetcher on a branch: %v", err)
+	}
+	argv := p.Rollup[0].Name
+	for _, want := range []string{
+		"api graphql",
+		"-F owner=go-pkgx",
+		"-F name=pkgx",
+		"-F ref=refs/heads/main",
+		"--jq",
+		`statusCheckRollup:(.data.repository.ref.target.statusCheckRollup.contexts.nodes`,
+	} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("gh was called as\n  %s\nwhich does not contain\n  %s", argv, want)
+		}
+	}
+	if strings.Contains(argv, "pr view") {
+		t.Errorf("a branch was asked for with `pr view`:\n  %s", argv)
+	}
+	// The reference must survive the round trip, or a multi-target run cannot
+	// say which answer belonged to which.
+	if p.Branch != "main" || p.Repo != "go-pkgx/pkgx" || p.Number != 0 {
+		t.Errorf("the target was lost: %+v", p)
+	}
+}
+
+// A branch is neither open nor merged and has nothing to merge into, so the
+// branch query SUPPLIES state and mergeable rather than reading them. What
+// that buys is not "it passes" -- an answer with both fields empty passes too,
+// since assess only waits on the literal "UNKNOWN" -- but that a branch can
+// never be mistaken for a pull request that is merged, closed or conflicted,
+// each of which settles the wait on the spot and for the wrong reason.
+//
+// So the values are pinned against those four arms, which is what they are
+// actually for.
+func TestABranchIsNotMistakenForAFinishedPullRequest(t *testing.T) {
+	const body = `{"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":[
+	  {"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}`
+	p, err := decode([]byte(body), pr{Repo: "a/b", Branch: "main"})
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if p.State == "MERGED" || p.State == "CLOSED" {
+		t.Errorf("the branch query reports state %q, which assess settles on at once", p.State)
+	}
+	if p.Mergeable == "CONFLICTING" {
+		t.Error(`the branch query reports CONFLICTING, which assess fails on at once`)
+	}
+	if p.Mergeable == "UNKNOWN" {
+		t.Error("the branch query reports UNKNOWN, which assess waits on forever for a branch")
+	}
+	if v, why := assess(p, 1); v != passed {
+		t.Fatalf("a green branch gave %v (%s)", v, why)
+	}
+	// And the four values that WOULD derail it, so the choice above is shown
+	// to be a choice: each of these settles the wait without looking at the
+	// checks, or waits on a mergeability a branch will never have.
+	for _, bad := range []pr{
+		{State: "MERGED"}, {State: "CLOSED"},
+		{Mergeable: "CONFLICTING"}, {Mergeable: "UNKNOWN"},
+	} {
+		bad.Rollup = p.Rollup
+		bad.Repo, bad.Branch = "a/b", "main"
+		if v, _ := assess(bad, 1); v == passed && bad.State != "MERGED" {
+			t.Errorf("%+v passed; it should not", bad)
+		}
 	}
 }
