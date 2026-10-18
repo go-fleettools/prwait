@@ -42,22 +42,31 @@ import (
 	"time"
 )
 
-const usage = `prwait — wait for a pull request's checks, and refuse to call an empty list a pass
+const usage = `prwait — wait for a pull request's or a branch's checks, and refuse to call an empty list a pass
 
 usage:
-  prwait [-repo OWNER/REPO] [flags] <pr>...
+  prwait [-repo OWNER/REPO] [flags] <target>...
 
-a <pr> is either a number (with -repo) or OWNER/REPO#NUMBER.
+a <target> is
+  82                 a pull request (with -repo)
+  OWNER/REPO#82      a pull request, spelled whole
+  @main              a BRANCH (with -repo)
+  OWNER/REPO@main    a branch, spelled whole
+
+A branch always carries the @, so a mistyped number stays an error instead of
+becoming a wait on a branch nobody named. The two answer different questions:
+a pull request asks "may this land", a branch asks "is what landed green",
+which is what you want before tagging a release.
 
 flags:
-  -repo OWNER/REPO   repository for bare numbers
+  -repo OWNER/REPO   repository for bare targets
   -interval 45s      how often to ask
   -timeout 30m       give up after this, per run
   -min-checks 1      how many checks must EXIST before a pass is possible
   -gh gh             the gh binary to ask
 
 exit status:
-  0  every pull request finished, with checks, all green
+  0  every target finished, with checks, all green
   1  one finished red, or conflicts, or ran out of time
   2  refused: bad usage, gh missing, or an answer that could not be read
 `
@@ -116,9 +125,16 @@ type pr struct {
 	Mergeable string  `json:"mergeable"`
 	State     string  `json:"state"`
 	Rollup    []entry `json:"statusCheckRollup"`
+	// Branch is set instead of Number when the target is a branch.
+	Branch string
 }
 
-func (p pr) String() string { return fmt.Sprintf("%s#%d", p.Repo, p.Number) }
+func (p pr) String() string {
+	if p.Branch != "" {
+		return p.Repo + "@" + p.Branch
+	}
+	return fmt.Sprintf("%s#%d", p.Repo, p.Number)
+}
 
 type verdict int
 
@@ -245,33 +261,98 @@ func tally(es []entry) string {
 }
 
 // ref is OWNER/REPO#NUMBER, or a bare number resolved against -repo.
-func parseRef(arg, defRepo string) (string, int, error) {
-	repo, num := defRepo, arg
-	if i := strings.LastIndex(arg, "#"); i >= 0 {
-		repo, num = arg[:i], arg[i+1:]
+// parseTarget reads one command-line target: a pull request, or a BRANCH.
+//
+//	82                     a pull request, with -repo
+//	go-pkgx/pkgx#82        a pull request, spelled whole
+//	@main                  a branch, with -repo
+//	go-pkgx/pkgx@main      a branch, spelled whole
+//
+// A branch ALWAYS carries the @, even as a bare argument. That is deliberate:
+// treating any bare non-number as a branch would turn a mistyped pull request
+// number ("8two") into a wait on a branch that does not exist, which reports
+// "no checks" instead of "that is not a number". One character buys an
+// unambiguous error.
+//
+// The two kinds answer different questions -- a pull request asks "may this
+// land", a branch asks "is what landed green" -- and the second is what you
+// need before tagging.
+func parseTarget(arg, defRepo string) (pr, error) {
+	repo, rest, isBranch := defRepo, arg, false
+	if i := strings.LastIndex(arg, "@"); i >= 0 {
+		repo, rest, isBranch = arg[:i], arg[i+1:], true
+		if repo == "" {
+			repo = defRepo // the bare "@branch" form
+		}
+	} else if i := strings.LastIndex(arg, "#"); i >= 0 {
+		repo, rest = arg[:i], arg[i+1:]
 	}
 	if repo == "" {
-		return "", 0, fmt.Errorf("%s: no repository — pass -repo OWNER/REPO or write OWNER/REPO#%s", arg, arg)
+		return pr{}, fmt.Errorf("%s: no repository — pass -repo OWNER/REPO or write OWNER/REPO#%s", arg, arg)
 	}
 	if strings.Count(repo, "/") != 1 || strings.HasPrefix(repo, "/") || strings.HasSuffix(repo, "/") {
-		return "", 0, fmt.Errorf("%s: %q is not OWNER/REPO", arg, repo)
+		return pr{}, fmt.Errorf("%s: %q is not OWNER/REPO", arg, repo)
 	}
-	n, err := strconv.Atoi(num)
+	if rest == "" {
+		if isBranch {
+			return pr{}, fmt.Errorf("%s: nothing after the @", arg)
+		}
+		return pr{}, fmt.Errorf("%s: nothing after the #", arg)
+	}
+	if isBranch {
+		return pr{Repo: repo, Branch: rest}, nil
+	}
+	n, err := strconv.Atoi(rest)
 	if err != nil || n <= 0 {
-		return "", 0, fmt.Errorf("%s: %q is not a pull request number", arg, num)
+		return pr{}, fmt.Errorf("%s: %q is not a pull request number (a branch is written @%s)", arg, rest, rest)
 	}
-	return repo, n, nil
+	return pr{Repo: repo, Number: n}, nil
 }
 
 // fetcher asks for one observation. It is a parameter so the tests can run
 // every rule without a network and without gh.
-type fetcher func(repo string, num int) (pr, error)
+type fetcher func(t pr) (pr, error)
+
+// branchQuery asks for a branch's check rollup and has gh reshape the answer
+// into the SAME object `gh pr view` returns, so every rule in assess applies
+// unchanged.
+//
+// state and mergeable are supplied, not read: a branch is neither open nor
+// merged and has nothing to merge into, so "OPEN"/"MERGEABLE" are the values
+// that make assess ask only about the checks. Writing them here rather than
+// special-casing assess keeps one set of rules for both kinds of target.
+const branchQuery = `query($owner:String!,$name:String!,$ref:String!){
+  repository(owner:$owner,name:$name){
+    ref(qualifiedName:$ref){ target{ ... on Commit{ oid
+      statusCheckRollup{ contexts(last:100){ nodes{
+        __typename
+        ... on CheckRun{ name status conclusion }
+        ... on StatusContext{ context state }
+      } } }
+    } } }
+  }
+}`
+
+const branchJQ = `{mergeable:"MERGEABLE",state:"OPEN",` +
+	`statusCheckRollup:(.data.repository.ref.target.statusCheckRollup.contexts.nodes // [])}`
 
 func ghFetcher(bin string) fetcher {
-	return func(repo string, num int) (pr, error) {
-		cmd := exec.Command(bin, "pr", "view", strconv.Itoa(num),
-			"--repo", repo,
-			"--json", "mergeable,state,statusCheckRollup")
+	return func(t pr) (pr, error) {
+		var cmd *exec.Cmd
+		switch {
+		case t.Branch != "":
+			owner, name, _ := strings.Cut(t.Repo, "/")
+			cmd = exec.Command(bin, "api", "graphql",
+				"-f", "query="+branchQuery,
+				"-F", "owner="+owner,
+				"-F", "name="+name,
+				"-F", "ref=refs/heads/"+t.Branch,
+				"--jq", branchJQ)
+		default:
+			cmd = exec.Command(bin, "pr", "view", strconv.Itoa(t.Number),
+				"--repo", t.Repo,
+				"--json", "mergeable,state,statusCheckRollup")
+		}
 		var errb strings.Builder
 		cmd.Stderr = &errb
 		out, err := cmd.Output()
@@ -280,18 +361,18 @@ func ghFetcher(bin string) fetcher {
 			if msg == "" {
 				msg = err.Error()
 			}
-			return pr{}, fmt.Errorf("gh pr view %s#%d: %s", repo, num, msg)
+			return pr{}, fmt.Errorf("gh: %s: %s", t, msg)
 		}
-		return decode(out, repo, num)
+		return decode(out, t)
 	}
 }
 
-func decode(out []byte, repo string, num int) (pr, error) {
+func decode(out []byte, t pr) (pr, error) {
 	var p pr
 	if err := json.Unmarshal(out, &p); err != nil {
-		return pr{}, fmt.Errorf("%s#%d: cannot read gh's answer: %w", repo, num, err)
+		return pr{}, fmt.Errorf("%s: cannot read gh's answer: %w", t, err)
 	}
-	p.Repo, p.Number = repo, num
+	p.Repo, p.Number, p.Branch = t.Repo, t.Number, t.Branch
 	return p, nil
 }
 
@@ -332,7 +413,7 @@ func (w waiter) wait(refs []pr) bool {
 	for len(left) > 0 {
 		var still []pr
 		for _, p := range left {
-			got, err := w.fetch(p.Repo, p.Number)
+			got, err := w.fetch(p)
 			if err != nil {
 				fails[p.String()]++
 				if n := fails[p.String()]; n < fetchRetries && w.now().Sub(start) < w.timeout {
@@ -395,12 +476,12 @@ func main() {
 	}
 	var refs []pr
 	for _, arg := range fs.Args() {
-		r, n, err := parseRef(arg, *repo)
+		t, err := parseTarget(arg, *repo)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "prwait:", err)
 			os.Exit(2)
 		}
-		refs = append(refs, pr{Repo: r, Number: n})
+		refs = append(refs, t)
 	}
 	w := waiter{
 		fetch:     ghFetcher(*ghBin),
