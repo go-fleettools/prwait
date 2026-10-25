@@ -8,4 +8,10 @@ module github.com/go-fleettools/prwait
 // through `go-version-file: go.mod`.
 //
 // Within the same minor, so nothing that could build this before cannot now.
-go 1.27.2
+//
+// Raised to 1.27.3 on 2026-10-25 for GO-2026-6809 — crypto/x509, where
+// compromised intermediate certificates are no longer refused by
+// Certificate.Verify — fix RELEASED in 1.27.3. Same reasoning, second
+// occurrence in a fortnight: this line is not a floor chosen for the language
+// features it admits, it is the toolchain the security gate judges.
+go 1.27.3
