@@ -144,6 +144,7 @@ func TestParseTarget(t *testing.T) {
 	for _, c := range []struct {
 		arg, def, repo, branch string
 		num                    int
+		run                    int64
 		bad                    bool
 	}{
 		// pull requests, unchanged
@@ -165,6 +166,22 @@ func TestParseTarget(t *testing.T) {
 		{arg: "@main", def: "", bad: true}, // no repository anywhere
 		{arg: "a/b@", def: "", bad: true},  // nothing after the @
 		{arg: "a/b/c@main", def: "", bad: true},
+
+		// workflow runs, which always carry the !
+		{arg: "!40237685388", def: "a/b", repo: "a/b", run: 40237685388},
+		{arg: "a/b!40237685388", def: "", repo: "a/b", run: 40237685388},
+		{arg: "a/b!40237685388", def: "other/other", repo: "a/b", run: 40237685388},
+		{arg: "!1", def: "a/b", repo: "a/b", run: 1},
+		{arg: "!40237685388", def: "", bad: true}, // no repository anywhere
+		{arg: "a/b!", def: "", bad: true},         // nothing after the !
+		{arg: "a/b/c!1", def: "", bad: true},
+		{arg: "!0", def: "a/b", bad: true},
+		{arg: "!-3", def: "a/b", bad: true},
+		{arg: "!notanumber", def: "a/b", bad: true},
+		// ⛔ ELEVEN DIGITS AND CLIMBING: a run id overflows a 32-bit int,
+		// and Atoi would have made every real id an error on a 32-bit
+		// build — the platforms this fleet publishes for include some.
+		{arg: "!9223372036854775807", def: "a/b", repo: "a/b", run: 9223372036854775807},
 	} {
 		got, err := parseTarget(c.arg, c.def)
 		if c.bad {
@@ -177,9 +194,9 @@ func TestParseTarget(t *testing.T) {
 			t.Errorf("parseTarget(%q, %q): %v", c.arg, c.def, err)
 			continue
 		}
-		if got.Repo != c.repo || got.Number != c.num || got.Branch != c.branch {
-			t.Errorf("parseTarget(%q, %q) = {repo:%s num:%d branch:%s}, want {repo:%s num:%d branch:%s}",
-				c.arg, c.def, got.Repo, got.Number, got.Branch, c.repo, c.num, c.branch)
+		if got.Repo != c.repo || got.Number != c.num || got.Branch != c.branch || got.Run != c.run {
+			t.Errorf("parseTarget(%q, %q) = {repo:%s num:%d branch:%s run:%d}, want {repo:%s num:%d branch:%s run:%d}",
+				c.arg, c.def, got.Repo, got.Number, got.Branch, got.Run, c.repo, c.num, c.branch, c.run)
 		}
 	}
 }
@@ -297,6 +314,74 @@ func testWaiter(f fetcher) waiter {
 		out:       os.Stdout,
 		sleep:     func(time.Duration) {},
 		now:       time.Now,
+	}
+}
+
+// ⛔ A RUN STILL GOING IS NEVER A PASS, which is the whole reason this
+// target exists. Measured 2026-10-25: `gh run watch` returned three times
+// while the run was in progress, and the conclusion read next did not
+// exist yet — a build still compiling, reported as a build that failed.
+//
+// The bodies here are what runJQ produces, so this covers the reshape and
+// the judgement together: a jq that forgot to uppercase, or that let a
+// null conclusion through, lands on these cases rather than in a run.
+func TestARunStillGoingIsNotAPass(t *testing.T) {
+	const inProgress = `{"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":[` +
+		`{"__typename":"CheckRun","name":"build (run)","status":"IN_PROGRESS","conclusion":""}]}`
+	const queued = `{"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":[` +
+		`{"__typename":"CheckRun","name":"build (run)","status":"QUEUED","conclusion":""}]}`
+
+	for _, body := range []string{inProgress, queued} {
+		p, err := decode([]byte(body), pr{Repo: "a/b", Run: 40237685388})
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if p.Run != 40237685388 || p.String() != "a/b!40237685388" {
+			t.Errorf("the run was lost on the way back: %+v / %s", p, p)
+		}
+		if v, _ := assess(p, 1); v != waiting {
+			t.Errorf("a run that has not finished assessed as %v, want waiting:\n%s", v, body)
+		}
+	}
+
+	// And the finished ones answer, in both directions.
+	for _, c := range []struct {
+		concl string
+		want  verdict
+	}{{"SUCCESS", passed}, {"FAILURE", failed}, {"CANCELLED", failed}, {"TIMED_OUT", failed}} {
+		body := `{"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":[` +
+			`{"__typename":"CheckRun","name":"build (run)","status":"COMPLETED","conclusion":"` + c.concl + `"}]}`
+		p, err := decode([]byte(body), pr{Repo: "a/b", Run: 1})
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if v, _ := assess(p, 1); v != c.want {
+			t.Errorf("a %s run assessed as %v, want %v", c.concl, v, c.want)
+		}
+	}
+}
+
+// ⛔ LOWERCASE IS WHAT `gh run view` ACTUALLY ANSWERS, and entry.done()
+// tests the GraphQL spelling COMPLETED. Left unconverted a finished run
+// looks unfinished forever — prwait would wait out its timeout on a
+// green build, which is this target's failure mode with the sign
+// reversed. runJQ upcases; this is the test that says why.
+func TestTheRunReshapeMustUppercase(t *testing.T) {
+	lower := `{"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":[` +
+		`{"__typename":"CheckRun","name":"build (run)","status":"completed","conclusion":"success"}]}`
+	p, err := decode([]byte(lower), pr{Repo: "a/b", Run: 1})
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if v, _ := assess(p, 1); v == passed {
+		t.Error("lowercase was accepted, so runJQ could stop upcasing and nothing would notice")
+	}
+	if !strings.Contains(runJQ, "ascii_upcase") {
+		t.Error("runJQ no longer upcases, and a finished run will look unfinished forever")
+	}
+	// The null a running job really sends must not reach ascii_upcase.
+	if !strings.Contains(runJQ, `// ""`) {
+		t.Error("runJQ no longer guards a null conclusion; jq errors on every poll until the run ends")
 	}
 }
 

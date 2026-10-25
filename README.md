@@ -73,8 +73,39 @@ never reads, prints or passes a token, and nothing secret ever reaches a command
 prwait [-repo OWNER/REPO] [flags] <pr>...
 ```
 
-A `<pr>` is either a number (with `-repo`) or `OWNER/REPO#NUMBER`, so a single run can
-span repositories — which is what a dependency bump across a family of modules needs.
+A target is one of three things, each with its own sigil, and a single run can span
+repositories — which is what a dependency bump across a family of modules needs.
+
+| target | asks |
+|---|---|
+| `82` or `OWNER/REPO#82` | a **pull request**: may this land |
+| `@main` or `OWNER/REPO@main` | a **branch**: is what landed green — what you want before tagging |
+| `!40237685388` or `OWNER/REPO!402…` | a **workflow run**: did that dispatch finish, and how |
+
+Each sigil is required, so a mistyped number stays an error instead of becoming a wait
+on something nobody named: a run id and a pull request number are both bare digits.
+
+### Why a run target, when `gh run watch` exists
+
+A dispatched run has no pull request and no checks, so neither of the other forms can
+see one. Measured 2026-10-25, chasing a build across three CI defects: `gh run watch`
+**returned three times while the run was still in progress**, and each time the
+conclusion read next did not exist yet — a build still compiling, reported as a build
+that failed.
+
+Here a run is simply one check, judged by the same rules as any other, so *not
+finished* is never a pass:
+
+```console
+$ prwait -repo go-pkgx/packages '!40237685388'
+go-pkgx/packages!40237685388 TIMEOUT after 40s — 1 of 1 running (build (run))
+```
+
+⛔ The reshape **uppercases**. `gh run view --json status` answers `completed` while the
+rollup rules test the GraphQL spelling `COMPLETED`; left as it comes, a finished run
+would look unfinished forever and prwait would wait out its timeout on a green build —
+this target's failure mode with the sign reversed. A test pins both that and the `null`
+conclusion a running job really sends.
 
 | flag | default | |
 |---|---|---|

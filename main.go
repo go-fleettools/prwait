@@ -52,11 +52,20 @@ a <target> is
   OWNER/REPO#82      a pull request, spelled whole
   @main              a BRANCH (with -repo)
   OWNER/REPO@main    a branch, spelled whole
+  !40237685388       a workflow RUN (with -repo)
+  OWNER/REPO!402376  a run, spelled whole
 
-A branch always carries the @, so a mistyped number stays an error instead of
-becoming a wait on a branch nobody named. The two answer different questions:
-a pull request asks "may this land", a branch asks "is what landed green",
-which is what you want before tagging a release.
+Each kind carries its own sigil, so a mistyped number stays an error instead
+of becoming a wait on something nobody named. They answer different
+questions: a pull request asks "may this land", a branch asks "is what landed
+green" — which is what you want before tagging a release — and a run asks
+"did that dispatch finish, and how".
+
+A run has no pull request and no checks, so neither of the other forms can
+see one, and "gh run watch" is what people reach for instead. Measured
+2026-10-25: it returned three times while the run was still in progress, and
+each time the conclusion read next did not exist yet. Here a run is one
+check, judged by the same rules as any other: not finished is never a pass.
 
 flags:
   -repo OWNER/REPO   repository for bare targets
@@ -127,11 +136,24 @@ type pr struct {
 	Rollup    []entry `json:"statusCheckRollup"`
 	// Branch is set instead of Number when the target is a branch.
 	Branch string
+	// Run is set instead of either when the target is a workflow RUN.
+	//
+	// ⛔ A DISPATCHED RUN HAS NO PULL REQUEST AND NO CHECKS, so neither of
+	// the other two forms can see it, and `gh run watch` is what one
+	// reaches for instead. Measured 2026-10-25: it returned three times
+	// while the run was still `in_progress`, and each time the next thing
+	// read was a conclusion that did not exist yet — "the build failed"
+	// about a build still compiling. An answer not yet given must not read
+	// as a negative.
+	Run int64
 }
 
 func (p pr) String() string {
-	if p.Branch != "" {
+	switch {
+	case p.Branch != "":
 		return p.Repo + "@" + p.Branch
+	case p.Run != 0:
+		return fmt.Sprintf("%s!%d", p.Repo, p.Run)
 	}
 	return fmt.Sprintf("%s#%d", p.Repo, p.Number)
 }
@@ -278,11 +300,21 @@ func tally(es []entry) string {
 // land", a branch asks "is what landed green" -- and the second is what you
 // need before tagging.
 func parseTarget(arg, defRepo string) (pr, error) {
-	repo, rest, isBranch := defRepo, arg, false
+	repo, rest, isBranch, isRun := defRepo, arg, false, false
 	if i := strings.LastIndex(arg, "@"); i >= 0 {
 		repo, rest, isBranch = arg[:i], arg[i+1:], true
 		if repo == "" {
 			repo = defRepo // the bare "@branch" form
+		}
+	} else if i := strings.LastIndex(arg, "!"); i >= 0 {
+		// ⛔ A RUN GETS ITS OWN SIGIL for the reason a branch does: a run
+		// id and a pull request number are both bare digits, and the two
+		// ask different questions of different objects. Without the `!` a
+		// mistyped id becomes a wait on pull request 40237685388, which
+		// does not exist — a refusal, luckily, but by accident.
+		repo, rest, isRun = arg[:i], arg[i+1:], true
+		if repo == "" {
+			repo = defRepo // the bare "!123" form
 		}
 	} else if i := strings.LastIndex(arg, "#"); i >= 0 {
 		repo, rest = arg[:i], arg[i+1:]
@@ -294,17 +326,28 @@ func parseTarget(arg, defRepo string) (pr, error) {
 		return pr{}, fmt.Errorf("%s: %q is not OWNER/REPO", arg, repo)
 	}
 	if rest == "" {
-		if isBranch {
+		switch {
+		case isBranch:
 			return pr{}, fmt.Errorf("%s: nothing after the @", arg)
+		case isRun:
+			return pr{}, fmt.Errorf("%s: nothing after the !", arg)
 		}
 		return pr{}, fmt.Errorf("%s: nothing after the #", arg)
 	}
 	if isBranch {
 		return pr{Repo: repo, Branch: rest}, nil
 	}
+	if isRun {
+		// 64 bits: a run id is already eleven digits and climbing.
+		id, err := strconv.ParseInt(rest, 10, 64)
+		if err != nil || id <= 0 {
+			return pr{}, fmt.Errorf("%s: %q is not a workflow run id", arg, rest)
+		}
+		return pr{Repo: repo, Run: id}, nil
+	}
 	n, err := strconv.Atoi(rest)
 	if err != nil || n <= 0 {
-		return pr{}, fmt.Errorf("%s: %q is not a pull request number (a branch is written @%s)", arg, rest, rest)
+		return pr{}, fmt.Errorf("%s: %q is not a pull request number (a branch is written @%s, a run !%s)", arg, rest, rest, rest)
 	}
 	return pr{Repo: repo, Number: n}, nil
 }
@@ -336,10 +379,33 @@ const branchQuery = `query($owner:String!,$name:String!,$ref:String!){
 const branchJQ = `{mergeable:"MERGEABLE",state:"OPEN",` +
 	`statusCheckRollup:(.data.repository.ref.target.statusCheckRollup.contexts.nodes // [])}`
 
+// runJQ reshapes `gh run view` into the object every rule here already
+// understands: one CheckRun whose name is the workflow's.
+//
+// ⛔ UPPERCASED, because entry.done() tests `COMPLETED` — the GraphQL
+// spelling — while `gh run view --json status` answers `completed`. Left
+// lowercase the run would never look done and prwait would wait out its
+// timeout on a finished, green build: the failure this target exists to
+// prevent, wearing the opposite sign.
+//
+// ⛔ `// ""` before the upcase, because a run still going has a NULL
+// conclusion, and `null | ascii_upcase` is a jq error — which would
+// arrive as "cannot read gh's answer" on every poll until the run ended.
+const runJQ = `{mergeable:"MERGEABLE",state:"OPEN",statusCheckRollup:[{` +
+	`__typename:"CheckRun",` +
+	`name:((.name // "") + " (run)"),` +
+	`status:((.status // "") | ascii_upcase),` +
+	`conclusion:((.conclusion // "") | ascii_upcase)}]}`
+
 func ghFetcher(bin string) fetcher {
 	return func(t pr) (pr, error) {
 		var cmd *exec.Cmd
 		switch {
+		case t.Run != 0:
+			cmd = exec.Command(bin, "run", "view", strconv.FormatInt(t.Run, 10),
+				"--repo", t.Repo,
+				"--json", "name,status,conclusion",
+				"--jq", runJQ)
 		case t.Branch != "":
 			owner, name, _ := strings.Cut(t.Repo, "/")
 			cmd = exec.Command(bin, "api", "graphql",
@@ -372,7 +438,10 @@ func decode(out []byte, t pr) (pr, error) {
 	if err := json.Unmarshal(out, &p); err != nil {
 		return pr{}, fmt.Errorf("%s: cannot read gh's answer: %w", t, err)
 	}
-	p.Repo, p.Number, p.Branch = t.Repo, t.Number, t.Branch
+	// Carried back, because gh's answer has none of them: without Run the
+	// report would call a run "repo#0" and the next poll would ask about
+	// pull request zero.
+	p.Repo, p.Number, p.Branch, p.Run = t.Repo, t.Number, t.Branch, t.Run
 	return p, nil
 }
 
