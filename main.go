@@ -21,6 +21,17 @@
 // only when at least -min-checks checks exist AND every one of them has
 // finished AND every conclusion is acceptable. Absence is never evidence.
 //
+// ⛔ AND A COMPLETE, ALL-GREEN CHECK LIST IS NOT A PASS EITHER. A check run
+// is created per JOB, so a workflow run that fails BEFORE its jobs are
+// created leaves no check run at all: nothing red, nothing pending, nothing
+// to count. Measured 2026-11-09 on go-tex/go-tex.github.io#239, head
+// 769bfee: this tool printed `PASS SUCCESS:3` while two of the four workflow
+// runs for that very SHA had `conclusion: failure` — `pages` with ZERO jobs
+// created and `playground` with one of its three. Every property the check
+// list can express was true. So the runs are read as well, from
+// actions/runs?head_sha=<oid>, and judged by the same rules; the check list
+// is the wrong noun on its own.
+//
 // # WHAT IT DOES NOT DO
 //
 // It does not merge, and it never sees a credential. It shells out to gh,
@@ -66,6 +77,13 @@ see one, and "gh run watch" is what people reach for instead. Measured
 2026-10-25: it returned three times while the run was still in progress, and
 each time the conclusion read next did not exist yet. Here a run is one
 check, judged by the same rules as any other: not finished is never a pass.
+
+⛔ A pull request and a branch are judged on their head commit's WORKFLOW
+RUNS as well as its checks. A check run exists per JOB, so a run that fails
+before any job is created leaves nothing red and nothing pending in the check
+list: measured 2026-11-09, three green checks and a PASS while two of the
+four runs for that SHA had conclusion=failure, one of them with no jobs at
+all. Both are read for the same commit, and both must be green.
 
 flags:
   -repo OWNER/REPO   repository for bare targets
@@ -128,12 +146,61 @@ func (e entry) result() string {
 	return e.State
 }
 
+// wfrun is one workflow run for the head commit, as the REST actions API
+// reports it. It is NOT a check run and does not appear in a check rollup:
+// see the third mechanism in this file's doc comment.
+type wfrun struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	URL        string `json:"html_url"`
+}
+
+// runsReply is the shape of actions/runs.
+type runsReply struct {
+	Runs []wfrun `json:"workflow_runs"`
+}
+
+// runEntries renders workflow runs as check entries, so ONE set of rules
+// judges both. The suffix keeps them apart in a report: "pages (workflow
+// run)" and a check named "pages" are different objects and a reader chasing
+// the red one needs to know which.
+//
+// ⛔ Upper-cased, because entry.done() tests the GraphQL spelling COMPLETED
+// while REST answers "completed". Left as REST spells it, a finished run
+// would never look done and the wait would run to its timeout — the mirror
+// image of the defect this file exists for.
+func runEntries(rs []wfrun) []entry {
+	es := make([]entry, 0, len(rs))
+	for _, r := range rs {
+		name := r.Name
+		if name == "" {
+			name = "(unnamed)"
+		}
+		es = append(es, entry{
+			Typename:   "WorkflowRun",
+			Name:       name + " (workflow run)",
+			Status:     strings.ToUpper(r.Status),
+			Conclusion: strings.ToUpper(r.Conclusion),
+		})
+	}
+	return es
+}
+
 type pr struct {
 	Repo      string
 	Number    int
 	Mergeable string  `json:"mergeable"`
 	State     string  `json:"state"`
 	Rollup    []entry `json:"statusCheckRollup"`
+	// HeadRefOid is the head commit the checks and the runs are bound to.
+	// Every verdict is about a SHA, never about a branch name or a number:
+	// those move while the wait is running.
+	HeadRefOid string `json:"headRefOid"`
+	// Runs are the workflow runs for HeadRefOid. They are judged beside the
+	// rollup but are NOT counted towards -min-checks: that threshold is
+	// about checks existing, and a run is a different kind of evidence.
+	Runs []wfrun `json:"-"`
 	// Branch is set instead of Number when the target is a branch.
 	Branch string
 	// Run is set instead of either when the target is a workflow RUN.
@@ -229,17 +296,26 @@ func assess(p pr, minChecks int) (verdict, string) {
 		}
 		return waiting, fmt.Sprintf("%d checks, want at least %d", len(p.Rollup), minChecks)
 	}
+	// FROM HERE ON, THE RUNS ARE JUDGED BESIDE THE CHECKS. The threshold
+	// above counted checks alone on purpose; everything below asks "has it
+	// finished" and "did it pass", which a workflow run answers in its own
+	// right — and answers in the one case the check list cannot express at
+	// all, a run that failed before creating any job.
+	judged := make([]entry, 0, len(p.Rollup)+len(p.Runs))
+	judged = append(judged, p.Rollup...)
+	judged = append(judged, runEntries(p.Runs)...)
+
 	var pending []string
-	for _, e := range p.Rollup {
+	for _, e := range judged {
 		if !e.done() {
 			pending = append(pending, e.label())
 		}
 	}
 	if len(pending) > 0 {
-		return waiting, fmt.Sprintf("%d of %d running (%s)", len(pending), len(p.Rollup), strings.Join(trim(pending, 3), ", "))
+		return waiting, fmt.Sprintf("%d of %d running (%s)", len(pending), len(judged), strings.Join(trim(pending, 3), ", "))
 	}
 	var bad []string
-	for _, e := range p.Rollup {
+	for _, e := range judged {
 		if !ok(e.result()) {
 			bad = append(bad, fmt.Sprintf("%s=%s", e.label(), e.result()))
 		}
@@ -253,7 +329,7 @@ func assess(p pr, minChecks int) (verdict, string) {
 	if p.Mergeable == "UNKNOWN" {
 		return waiting, "checks green, mergeability not computed yet"
 	}
-	return passed, tally(p.Rollup)
+	return passed, tally(judged)
 }
 
 func trim(s []string, n int) []string {
@@ -376,7 +452,12 @@ const branchQuery = `query($owner:String!,$name:String!,$ref:String!){
   }
 }`
 
+// headRefOid is carried through under the SAME name `gh pr view` uses, so
+// the one field serves both kinds of target and the runs lookup needs no
+// special case. The query already selected `oid`; dropping it was what left
+// the branch form unable to name the commit it was judging.
 const branchJQ = `{mergeable:"MERGEABLE",state:"OPEN",` +
+	`headRefOid:(.data.repository.ref.target.oid // ""),` +
 	`statusCheckRollup:(.data.repository.ref.target.statusCheckRollup.contexts.nodes // [])}`
 
 // runJQ reshapes `gh run view` into the object every rule here already
@@ -417,7 +498,7 @@ func ghFetcher(bin string) fetcher {
 		default:
 			cmd = exec.Command(bin, "pr", "view", strconv.Itoa(t.Number),
 				"--repo", t.Repo,
-				"--json", "mergeable,state,statusCheckRollup")
+				"--json", "headRefOid,mergeable,state,statusCheckRollup")
 		}
 		var errb strings.Builder
 		cmd.Stderr = &errb
@@ -429,8 +510,87 @@ func ghFetcher(bin string) fetcher {
 			}
 			return pr{}, fmt.Errorf("gh: %s: %s", t, msg)
 		}
-		return decode(out, t)
+		p, err := decode(out, t)
+		if err != nil {
+			return pr{}, err
+		}
+		// A RUN TARGET IS ALREADY A RUN: asking the actions API which runs
+		// share its head commit would drag in every other workflow for that
+		// SHA, which is not what `!<id>` was asked about.
+		if t.Run != 0 {
+			return p, nil
+		}
+		if p.HeadRefOid == "" {
+			// Not an absence to pass over: without the SHA there is nothing
+			// to bind a verdict to, and a verdict bound to a branch name or
+			// a pull request number is about whatever moved there since.
+			return pr{}, fmt.Errorf("%s: gh gave no head commit, so no verdict can be bound to one", t)
+		}
+		runs, err := fetchRuns(bin, t, p.HeadRefOid)
+		if err != nil {
+			return pr{}, err
+		}
+		p.Runs = runs
+		return p, nil
 	}
+}
+
+// fetchRuns reads the workflow runs for one commit.
+//
+// ⛔ head_sha, never the branch or the pull request: both move while a wait
+// is running, and a verdict about a different commit than the one measured
+// is the defect this tool is made of.
+func fetchRuns(bin string, t pr, sha string) ([]wfrun, error) {
+	// ⛔ A SHORT SHA ANSWERS [] AND SAYS NOTHING. Measured 2026-11-09:
+	// head_sha=e18cc9b returned an empty workflow_runs list for a commit that
+	// had a run in progress, while the same query with all 40 characters
+	// found it. An empty list is indistinguishable from "no workflows here",
+	// which is a legitimate state, so the abbreviation would pass as an
+	// absence rather than fail as an error. gh gives the full oid; anything
+	// else is a programming mistake and is refused as one.
+	if !fullSHA(sha) {
+		return nil, fmt.Errorf("%s: %q is not a full 40-character commit; head_sha answers an empty list for an abbreviation", t, sha)
+	}
+	cmd := exec.Command(bin, "api",
+		fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&per_page=100", t.Repo, sha))
+	var errb strings.Builder
+	cmd.Stderr = &errb
+	out, err := cmd.Output()
+	if err != nil {
+		msg := strings.TrimSpace(errb.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("gh: %s: workflow runs for %s: %s", t, short(sha), msg)
+	}
+	var reply runsReply
+	if err := json.Unmarshal(out, &reply); err != nil {
+		return nil, fmt.Errorf("%s: cannot read the workflow runs for %s: %w", t, short(sha), err)
+	}
+	return reply.Runs, nil
+}
+
+// fullSHA reports whether s is a whole 40-character hexadecimal commit.
+func fullSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// short abbreviates a commit for a message.
+func short(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 func decode(out []byte, t pr) (pr, error) {

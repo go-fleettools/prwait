@@ -1,6 +1,6 @@
 # prwait
 
-Wait until a pull request's checks are finished — and **refuse to call an empty check list a pass**.
+Wait until a pull request's checks are finished — and **refuse to call an empty check list a pass**, or a complete and entirely green one, when a workflow run for the same commit is red.
 
 ```console
 $ prwait -repo go-pkgx/pkgx 82 83
@@ -37,6 +37,37 @@ So the rule here is the inverse of the obvious one:
 
 > A pull request passes only when **at least `-min-checks` checks exist**, **every one of
 > them has finished**, and **every conclusion is acceptable**. Absence is never evidence.
+
+### And a complete, all-green check list is not a pass either
+
+A check run is created **per job**. A workflow run that fails *before its jobs are
+created* therefore leaves **no check run at all**: nothing red, nothing pending, nothing
+to count.
+
+Measured on `go-tex/go-tex.github.io#239`, head `769bfee`, 2026-11-09 — prwait v0.5.0
+printed `PASS SUCCESS:3` and exited `0`:
+
+| what was asked | what it said |
+|---|---|
+| `commits/769bfee/check-runs` | 3 check runs, **all `success`**, none pending |
+| `actions/runs?head_sha=769bfee` | `docs` success, `links` success, **`pages` failure**, **`playground` failure** |
+
+`pages` had created **zero** jobs and `playground` one of its three. Every property the
+check list can express was true, which is why the rule above was not enough: the check
+list is the wrong noun on its own. So a pull request and a branch are judged on their
+head commit's **workflow runs** as well, read from `actions/runs?head_sha=<oid>` and put
+through the same table — a run still going keeps the wait going, and
+`startup_failure`, the conclusion only a run can carry, is a failure like any other.
+
+⛔ The verdict is bound to the **SHA**, never to the branch name or the number: both move
+while a wait is running. An answer carrying no head commit is refused rather than judged
+on its checks alone.
+
+⛔ And the SHA must be **whole**. Measured the same day: `head_sha=e18cc9b` answered an
+empty `workflow_runs` list for a commit that had a run *in progress*, while the same query
+with all 40 characters found it. An empty list is a legitimate state — a repository with
+no workflows — so an abbreviation would have passed as an absence instead of failing as an
+error. Anything short of 40 hex characters is refused before `gh` is reached.
 
 ## What else it gets right
 
@@ -149,3 +180,8 @@ Each central guard has been proved breakable with
 | a pending commit status becomes "done" | `TestAPendingStatusContextStillWaits` |
 | `CANCELLED` counts as success | `TestWhichConclusionsCount` |
 | the unknown-mergeability wait | `TestUnknownMergeabilityKeepsWaiting` |
+| the workflow runs dropped from the judgement | `TestACompleteGreenCheckListWithARedRunIsNotAPass` |
+
+That last row was measured by hand before the code was trusted: with the runs removed
+from the judgement, the test reports `gave 1 (SUCCESS:3)` — **verbatim what prwait
+printed on the pull request that exposed this**.
