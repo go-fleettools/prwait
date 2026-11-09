@@ -426,9 +426,53 @@ func TestGhFetcherRunsTheBinaryAndReadsItsOutput(t *testing.T) {
 	}
 	// The helper echoes its own arguments into the check name, which is how
 	// a wrong flag or a lost repository shows up here.
-	want := "pr view 82 --repo go-pkgx/pkgx --json mergeable,state,statusCheckRollup"
+	want := "pr view 82 --repo go-pkgx/pkgx --json headRefOid,mergeable,state,statusCheckRollup"
 	if got := p.Rollup[0].Name; got != want {
 		t.Errorf("gh was called as\n  %s\nwant\n  %s", got, want)
+	}
+	// AND THE SECOND CALL, bound to the head commit. A verdict about a branch
+	// name or a pull request number is a verdict about whatever moved there
+	// while the wait was running.
+	if len(p.Runs) != 1 {
+		t.Fatalf("the workflow runs for the head commit were not read: %+v", p.Runs)
+	}
+	wantRuns := "api repos/go-pkgx/pkgx/actions/runs?head_sha=" + helperSHA + "&per_page=100"
+	if got := p.Runs[0].Name; got != wantRuns {
+		t.Errorf("the runs query was\n  %s\nwant\n  %s", got, wantRuns)
+	}
+}
+
+// ⛔ WITHOUT A HEAD COMMIT THERE IS NOTHING TO BIND A VERDICT TO. An answer
+// that carries no SHA is refused rather than judged on its checks alone,
+// because the alternative is a pass attributed to a commit nobody named —
+// and the checks in that answer are green, so judging them would pass.
+//
+// Through the REAL fetcher, not through a copy of its rule: a test that
+// re-implements the check it is checking passes whatever the code does.
+func TestNoHeadCommitIsRefusedRatherThanJudged(t *testing.T) {
+	f := ghFetcher(os.Args[0])
+	t.Setenv("PRWAIT_HELPER", "nosha")
+	_, err := f(pr{Repo: "a/b", Number: 1})
+	if err == nil {
+		t.Fatal("an answer with no head commit was accepted")
+	}
+	if !strings.Contains(err.Error(), "head commit") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+}
+
+// A GREEN RUNS QUERY THAT CANNOT BE READ IS NOT A PASS. It is a fetch error,
+// which the waiter retries and never counts as evidence — the same rule the
+// check query already follows.
+func TestAnUnreadableRunsAnswerIsAnErrorNotAnAbsence(t *testing.T) {
+	f := ghFetcher(os.Args[0])
+	t.Setenv("PRWAIT_HELPER", "badruns")
+	_, err := f(pr{Repo: "a/b", Number: 1})
+	if err == nil {
+		t.Fatal("an unreadable runs answer passed for no runs at all")
+	}
+	if !strings.Contains(err.Error(), "workflow runs") {
+		t.Errorf("the error does not say which query failed: %v", err)
 	}
 }
 
@@ -453,8 +497,36 @@ func TestMain(m *testing.M) {
 	case "fail":
 		fmt.Fprintln(os.Stderr, "gh: could not resolve to a PullRequest")
 		os.Exit(1)
+	case "nosha":
+		// Green checks, no head commit: the case that must be refused
+		// rather than judged on those checks.
+		fmt.Println(`{"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":` +
+			`[{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}`)
+		os.Exit(0)
+	case "badruns":
+		if strings.Contains(strings.Join(os.Args[1:], " "), "actions/runs") {
+			fmt.Println("}{ not json")
+			os.Exit(0)
+		}
+		fmt.Printf(`{"mergeable":"MERGEABLE","state":"OPEN","headRefOid":%q,"statusCheckRollup":`+
+			`[{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}`+"\n", helperSHA)
+		os.Exit(0)
 	default:
 		args := strings.Join(os.Args[1:], " ")
+		// THE SECOND CALL IS PART OF THE EXEC PATH TOO. A pull request is now
+		// judged on its head commit's workflow runs as well as its checks, so
+		// the helper must answer that query as well — and it answers it by
+		// NAMING ITS OWN ARGUMENTS, which is how a lost head_sha or a wrong
+		// path shows up in a test instead of in production.
+		if strings.Contains(args, "actions/runs") {
+			body, err := jsonRunName(args)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			fmt.Println(body)
+			os.Exit(0)
+		}
 		body, err := jsonName(args)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -463,6 +535,21 @@ func TestMain(m *testing.M) {
 		fmt.Println(body)
 		os.Exit(0)
 	}
+}
+
+// helperSHA is the head commit the helper reports, so the runs query has
+// something to be bound to.
+const helperSHA = "769bfee014e24a9070938cbea578565b1dc68add"
+
+// jsonRunName renders an actions/runs answer whose single run is NAMED after
+// the arguments the helper was given.
+func jsonRunName(args string) (string, error) {
+	b, err := json.Marshal(runsReply{Runs: []wfrun{{
+		Name:       args,
+		Status:     "completed",
+		Conclusion: "success",
+	}}})
+	return string(b), err
 }
 
 // jsonName renders an answer whose single check is NAMED after the
@@ -474,14 +561,16 @@ func jsonName(args string) (string, error) {
 		Conclusion string `json:"conclusion"`
 	}
 	type doc struct {
-		Mergeable string `json:"mergeable"`
-		State     string `json:"state"`
-		Rollup    []e    `json:"statusCheckRollup"`
+		Mergeable  string `json:"mergeable"`
+		State      string `json:"state"`
+		HeadRefOid string `json:"headRefOid"`
+		Rollup     []e    `json:"statusCheckRollup"`
 	}
 	b, err := json.Marshal(doc{
-		Mergeable: "MERGEABLE",
-		State:     "OPEN",
-		Rollup:    []e{{Name: args, Status: "COMPLETED", Conclusion: "SUCCESS"}},
+		Mergeable:  "MERGEABLE",
+		State:      "OPEN",
+		HeadRefOid: helperSHA,
+		Rollup:     []e{{Name: args, Status: "COMPLETED", Conclusion: "SUCCESS"}},
 	})
 	return string(b), err
 }
