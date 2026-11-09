@@ -541,6 +541,16 @@ func ghFetcher(bin string) fetcher {
 // is running, and a verdict about a different commit than the one measured
 // is the defect this tool is made of.
 func fetchRuns(bin string, t pr, sha string) ([]wfrun, error) {
+	// ⛔ A SHORT SHA ANSWERS [] AND SAYS NOTHING. Measured 2026-11-09:
+	// head_sha=e18cc9b returned an empty workflow_runs list for a commit that
+	// had a run in progress, while the same query with all 40 characters
+	// found it. An empty list is indistinguishable from "no workflows here",
+	// which is a legitimate state, so the abbreviation would pass as an
+	// absence rather than fail as an error. gh gives the full oid; anything
+	// else is a programming mistake and is refused as one.
+	if !fullSHA(sha) {
+		return nil, fmt.Errorf("%s: %q is not a full 40-character commit; head_sha answers an empty list for an abbreviation", t, sha)
+	}
 	cmd := exec.Command(bin, "api",
 		fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&per_page=100", t.Repo, sha))
 	var errb strings.Builder
@@ -558,6 +568,21 @@ func fetchRuns(bin string, t pr, sha string) ([]wfrun, error) {
 		return nil, fmt.Errorf("%s: cannot read the workflow runs for %s: %w", t, short(sha), err)
 	}
 	return reply.Runs, nil
+}
+
+// fullSHA reports whether s is a whole 40-character hexadecimal commit.
+func fullSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // short abbreviates a commit for a message.

@@ -63,6 +63,12 @@ through the same table — a run still going keeps the wait going, and
 while a wait is running. An answer carrying no head commit is refused rather than judged
 on its checks alone.
 
+⛔ And the SHA must be **whole**. Measured the same day: `head_sha=e18cc9b` answered an
+empty `workflow_runs` list for a commit that had a run *in progress*, while the same query
+with all 40 characters found it. An empty list is a legitimate state — a repository with
+no workflows — so an abbreviation would have passed as an absence instead of failing as an
+error. Anything short of 40 hex characters is refused before `gh` is reached.
+
 ## What else it gets right
 
 **A `StatusContext` is not a `CheckRun`.** GitHub's rollup mixes two shapes that share no

@@ -131,6 +131,29 @@ func TestAnUnnamedRunIsStillNamed(t *testing.T) {
 	}
 }
 
+// ⛔ AN ABBREVIATED COMMIT ANSWERS [] AND SAYS NOTHING. Measured 2026-11-09:
+// head_sha=e18cc9b returned an empty workflow_runs list for a commit that had
+// a run in progress; all 40 characters found it. An empty list is a
+// legitimate state — a repository with no workflows — so an abbreviation
+// would pass as an absence instead of failing as an error.
+func TestAnAbbreviatedCommitIsRefusedNotQueried(t *testing.T) {
+	for _, s := range []string{"", "e18cc9b", "e18cc9b7e50ba9a0cf57e8484ecdaa21beb26de", "e18cc9b7e50ba9a0cf57e8484ecdaa21beb26de1x", "z18cc9b7e50ba9a0cf57e8484ecdaa21beb26de1"} {
+		if fullSHA(s) {
+			t.Errorf("%q passed for a full commit", s)
+		}
+	}
+	if !fullSHA("e18cc9b7e50ba9a0cf57e8484ecdaa21beb26de1") {
+		t.Error("a real 40-character commit was refused")
+	}
+	// And through the function that queries, so the guard is not merely
+	// defined somewhere: gh is never reached, which is the point.
+	if _, err := fetchRuns("/nonexistent-gh", pr{Repo: "a/b", Number: 1}, "e18cc9b"); err == nil {
+		t.Fatal("an abbreviated commit was queried anyway")
+	} else if !strings.Contains(err.Error(), "40-character") {
+		t.Errorf("the refusal does not say what is wrong: %v", err)
+	}
+}
+
 // ⛔ The query must be bound to the SHA. A branch name or a pull request
 // number moves while a wait is running, and the runs for "main" an hour
 // later are not the runs for the commit that was measured.
