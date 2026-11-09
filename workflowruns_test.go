@@ -131,6 +131,52 @@ func TestAnUnnamedRunIsStillNamed(t *testing.T) {
 	}
 }
 
+// ⛔ A RETRIGGERED COMMIT MUST BE ABLE TO GO GREEN AGAIN. Measured by running
+// v0.6.0: two `pull_request` runs on go-tex/go-tex.github.io#239 failed to
+// start, closing and reopening the pull request produced fresh green ones for
+// the SAME commit, and actions/runs?head_sha returns both — so judging every
+// run refused a commit that was by then green. A gate that cannot go green is
+// a gate people route around.
+func TestASupersededRunDoesNotHoldACommitRedForever(t *testing.T) {
+	got := latestRuns([]wfrun{
+		{Name: "playground", WorkflowID: 1, Event: "pull_request", Number: 7, Conclusion: "failure", Status: "completed"},
+		{Name: "playground", WorkflowID: 1, Event: "pull_request", Number: 8, Conclusion: "success", Status: "completed"},
+	})
+	if len(got) != 1 {
+		t.Fatalf("the superseded run was kept: %+v", got)
+	}
+	if got[0].Conclusion != "success" || got[0].Number != 8 {
+		t.Fatalf("the wrong attempt survived: %+v", got[0])
+	}
+}
+
+// ⛔ AND THE TRAP UNDER THAT TRAP: on the same commit, a workflow_dispatch of
+// the playground workflow was GREEN while its pull_request run was RED — the
+// dispatch being a run started BY HAND to investigate the failure. Keyed on
+// the workflow alone it would have answered for the red one. A run started to
+// look into a failure must never be able to clear it.
+func TestADispatchCannotMaskAFailedPullRequestRun(t *testing.T) {
+	runs := []wfrun{
+		{Name: "playground", WorkflowID: 1, Event: "pull_request", Number: 7, Conclusion: "failure", Status: "completed"},
+		{Name: "playground", WorkflowID: 1, Event: "workflow_dispatch", Number: 8, Conclusion: "success", Status: "completed"},
+	}
+	if got := latestRuns(runs); len(got) != 2 {
+		t.Fatalf("the two events collapsed into %d run(s): %+v", len(got), got)
+	}
+	p := pr{Mergeable: "MERGEABLE", HeadRefOid: "cafe000",
+		Rollup: []entry{{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"}},
+		Runs:   latestRuns(runs)}
+	v, why := assess(p, 1)
+	if v != failed {
+		t.Fatalf("a green dispatch cleared a red pull_request run: %v (%s)", v, why)
+	}
+	// And the report says WHICH, because "playground (workflow run)" twice
+	// over cannot tell a reader where to look.
+	if !strings.Contains(why, "playground (pull_request run)=FAILURE") {
+		t.Errorf("the reason does not name the event: %q", why)
+	}
+}
+
 // ⛔ AN ABBREVIATED COMMIT ANSWERS [] AND SAYS NOTHING. Measured 2026-11-09:
 // head_sha=e18cc9b returned an empty workflow_runs list for a commit that had
 // a run in progress; all 40 characters found it. An empty list is a
