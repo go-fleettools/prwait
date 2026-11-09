@@ -154,6 +154,63 @@ type wfrun struct {
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
 	URL        string `json:"html_url"`
+	// WorkflowID, Event and Number identify WHICH attempt at a workflow this
+	// is. A commit can carry several runs of the same workflow — a failed one
+	// and the retrigger that replaced it — and judging both would make a
+	// commit that is now green unpassable forever. See [latestRuns].
+	WorkflowID int64  `json:"workflow_id"`
+	Event      string `json:"event"`
+	Number     int    `json:"run_number"`
+	Created    string `json:"created_at"`
+}
+
+// latestRuns keeps only the most recent run of each workflow FOR EACH EVENT,
+// and drops the ones it superseded.
+//
+// ⛔ MEASURED THE DAY THIS WAS WRITTEN, by running it. Two `pull_request`
+// runs on go-tex/go-tex.github.io#239 failed to start; closing and reopening
+// the pull request produced fresh, green `pull_request` runs for the SAME
+// commit. Both the old red and the new green are returned by
+// actions/runs?head_sha, so judging every run refused a commit that was by
+// then green — and a gate that cannot go green again is a gate people route
+// around, which is worse than no gate.
+//
+// ⛔ AND THE KEY INCLUDES THE EVENT, which is the trap under the trap. On
+// that same commit a `workflow_dispatch` of the playground workflow was GREEN
+// while its `pull_request` run was RED. Keyed on the workflow alone, the
+// dispatch — a run I had started myself, by hand, to see whether the branch
+// was sound — would have masked the red one. A run started to investigate a
+// failure must never be able to answer for it.
+func latestRuns(rs []wfrun) []wfrun {
+	type key struct {
+		id    int64
+		event string
+	}
+	best := map[key]wfrun{}
+	for _, r := range rs {
+		k := key{r.WorkflowID, r.Event}
+		cur, seen := best[k]
+		switch {
+		case !seen:
+		case r.Number > cur.Number:
+		case r.Number == cur.Number && r.Created > cur.Created:
+		default:
+			continue
+		}
+		best[k] = r
+	}
+	out := make([]wfrun, 0, len(best))
+	for _, r := range best {
+		out = append(out, r)
+	}
+	// Deterministic order, so a report reads the same twice.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Event < out[j].Event
+	})
+	return out
 }
 
 // runsReply is the shape of actions/runs.
@@ -177,9 +234,17 @@ func runEntries(rs []wfrun) []entry {
 		if name == "" {
 			name = "(unnamed)"
 		}
+		kind := "workflow"
+		if r.Event != "" {
+			// The EVENT is part of the identity: two runs of one workflow on
+			// one commit, from different events, are different answers, and a
+			// report that calls them both "pages (workflow run)" cannot say
+			// which one is red.
+			kind = r.Event
+		}
 		es = append(es, entry{
 			Typename:   "WorkflowRun",
-			Name:       name + " (workflow run)",
+			Name:       name + " (" + kind + " run)",
 			Status:     strings.ToUpper(r.Status),
 			Conclusion: strings.ToUpper(r.Conclusion),
 		})
@@ -567,7 +632,7 @@ func fetchRuns(bin string, t pr, sha string) ([]wfrun, error) {
 	if err := json.Unmarshal(out, &reply); err != nil {
 		return nil, fmt.Errorf("%s: cannot read the workflow runs for %s: %w", t, short(sha), err)
 	}
-	return reply.Runs, nil
+	return latestRuns(reply.Runs), nil
 }
 
 // fullSHA reports whether s is a whole 40-character hexadecimal commit.

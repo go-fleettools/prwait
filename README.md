@@ -63,6 +63,18 @@ through the same table — a run still going keeps the wait going, and
 while a wait is running. An answer carrying no head commit is refused rather than judged
 on its checks alone.
 
+⛔ Only the **latest run of each workflow, for each event**, is judged. A commit can carry
+a failed run and the retrigger that replaced it — `actions/runs?head_sha` returns both —
+and judging every run leaves a commit that is now green **unpassable forever**, which is a
+gate people route around rather than a gate.
+
+And the event is part of that key, which is the trap under the trap: on the commit that
+exposed all this, a `workflow_dispatch` of the playground workflow was **green** while its
+`pull_request` run was **red** — the dispatch being a run started by hand to find out
+whether the branch was sound. Keyed on the workflow alone, a run started to investigate a
+failure would have answered for it. The report names the event for the same reason:
+`playground (pull_request run)=FAILURE`, not `playground (workflow run)=FAILURE` twice.
+
 ⛔ And the SHA must be **whole**. Measured the same day: `head_sha=e18cc9b` answered an
 empty `workflow_runs` list for a commit that had a run *in progress*, while the same query
 with all 40 characters found it. An empty list is a legitimate state — a repository with
