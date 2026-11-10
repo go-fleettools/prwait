@@ -85,6 +85,16 @@ list: measured 2026-11-09, three green checks and a PASS while two of the
 four runs for that SHA had conclusion=failure, one of them with no jobs at
 all. Both are read for the same commit, and both must be green.
 
+⛔ A head that MOVES while the wait runs is refused, not followed:
+
+  OWNER/REPO#752 MOVED @e87aa0a -> @2baff07 — the head changed while waiting;
+  this wait judged neither, re-run against @2baff07
+
+Continuing to poll would silently re-point the wait at work nobody asked
+about and print a true statement about the wrong commit. Neither commit was
+judged as a whole, so neither gets a verdict, and the exit status is 1. A SHA
+one poll could not read is NOT a move.
+
 flags:
   -repo OWNER/REPO   repository for bare targets
   -interval 45s      how often to ask
@@ -738,6 +748,24 @@ func (w waiter) wait(refs []pr) bool {
 	// run fails if the errors do not stop. Consecutive, not cumulative —
 	// a blip an hour apart is weather, three in a row is a wall.
 	fails := map[string]int{}
+	// ⛔ A WAIT IS ABOUT A COMMIT, AND A MOVED HEAD IS A DIFFERENT COMMIT.
+	//
+	// #17 made the verdict NAME the commit it judged. Naming it is not enough
+	// on its own: when the head moves mid-wait, the poll silently re-points at
+	// work the caller never asked about, and the line that comes out is a true
+	// statement about a commit nobody was waiting for.
+	//
+	// It is not hypothetical. On 2026-11-10 a wait was started on go-tex/engine
+	// #752 at e87aa0a; a second commit was pushed to the same branch while it
+	// ran, and the caller's correct move was to KILL the wait and start another
+	// — which is this refusal, done by hand. Nothing here can do better than
+	// that, because the new head has not been judged as a whole by anything;
+	// what it can do is notice, and say which two commits are involved.
+	//
+	// It applies to a branch (@main) and a run as much as to a pull request: a
+	// release gate waiting on main must not answer about a commit that arrived
+	// after the one it was asked about. That is the whole of the risk.
+	firstHead := map[string]string{}
 	for len(left) > 0 {
 		var still []pr
 		for _, p := range left {
@@ -755,6 +783,18 @@ func (w waiter) wait(refs []pr) bool {
 			}
 			fails[p.String()] = 0
 			got.Repo, got.Number = p.Repo, p.Number
+			if fullSHA(got.HeadRefOid) {
+				key := p.String()
+				switch was := firstHead[key]; {
+				case was == "":
+					firstHead[key] = got.HeadRefOid
+				case was != got.HeadRefOid:
+					fmt.Fprintf(w.out, "%s MOVED @%s -> @%s — the head changed while waiting; this wait judged neither, re-run against @%s\n",
+						got, short(was), short(got.HeadRefOid), short(got.HeadRefOid))
+					allOK = false
+					continue
+				}
+			}
 			switch v, why := assess(got, w.minChecks); v {
 			case passed:
 				fmt.Fprintf(w.out, "%s%s PASS %s\n", got, at(got), why)
