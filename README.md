@@ -4,13 +4,21 @@ Wait until a pull request's checks are finished — and **refuse to call an empt
 
 ```console
 $ prwait -repo go-pkgx/pkgx 82 83
-go-pkgx/pkgx#82 PASS SUCCESS:24
-go-pkgx/pkgx#83 FAIL test (windows-latest)=FAILURE
+go-pkgx/pkgx#82 @4f21ab9 PASS SUCCESS:24
+go-pkgx/pkgx#83 @c0de17e FAIL test (windows-latest)=FAILURE
 
 $ prwait go-pkgx/bk#311 go-pkgx/mirror#28
 go-pkgx/bk#311 FAIL CONFLICTING — rebase it; any green ticks it shows are from the old base
-go-pkgx/mirror#28 PASS SUCCESS:20 SKIPPED:1
+go-pkgx/mirror#28 @9a0b113 PASS SUCCESS:20 SKIPPED:1
 ```
+
+⛔ **Every verdict names the commit it is about.** `#82 PASS` is true of *some*
+commit; a wait that straddles a push — start it, push again, read the result —
+cannot be acted on from that line alone, because the head it began with and the
+head it ended with are different pieces of work. Measured on exactly that
+sequence; the verdict happened to be right, and *"it was fine"* is not the same
+as *"I knew it was fine"*. A target with no commit to name (a conflicted pull
+request has no head to judge) prints none rather than an empty `@`.
 
 | exit | meaning |
 |---|---|

@@ -537,7 +537,12 @@ const branchJQ = `{mergeable:"MERGEABLE",state:"OPEN",` +
 // ⛔ `// ""` before the upcase, because a run still going has a NULL
 // conclusion, and `null | ascii_upcase` is a jq error — which would
 // arrive as "cannot read gh's answer" on every poll until the run ended.
-const runJQ = `{mergeable:"MERGEABLE",state:"OPEN",statusCheckRollup:[{` +
+// headRefOid is carried here too, so a run's verdict can name the commit it is
+// about like every other target's. A run HAS a head commit; it simply was not
+// asked for.
+const runJQ = `{mergeable:"MERGEABLE",state:"OPEN",` +
+	`headRefOid:(.headSha // ""),` +
+	`statusCheckRollup:[{` +
 	`__typename:"CheckRun",` +
 	`name:((.name // "") + " (run)"),` +
 	`status:((.status // "") | ascii_upcase),` +
@@ -550,7 +555,7 @@ func ghFetcher(bin string) fetcher {
 		case t.Run != 0:
 			cmd = exec.Command(bin, "run", "view", strconv.FormatInt(t.Run, 10),
 				"--repo", t.Repo,
-				"--json", "name,status,conclusion",
+				"--json", "name,status,conclusion,headSha",
 				"--jq", runJQ)
 		case t.Branch != "":
 			owner, name, _ := strings.Cut(t.Repo, "/")
@@ -633,6 +638,35 @@ func fetchRuns(bin string, t pr, sha string) ([]wfrun, error) {
 		return nil, fmt.Errorf("%s: cannot read the workflow runs for %s: %w", t, short(sha), err)
 	}
 	return latestRuns(reply.Runs), nil
+}
+
+// at renders the commit a verdict is ABOUT, as " @b33f79d", or "" when there is
+// none to name.
+//
+// ⛔ A VERDICT MUST SAY WHAT IT IS A VERDICT ABOUT. The line used to read
+//
+//	go-fleettools/fleettools#230 PASS SUCCESS:9
+//
+// which is true of SOME commit. A wait that straddles a push — start it, push
+// again, read the result — cannot be acted on from that line alone: the head it
+// began with and the head it ended with are different pieces of work, and
+// nothing in the output says which was judged. Measured 2026-11-10 on exactly
+// that sequence; the verdict happened to be right, and "it was fine" is not the
+// same as "I knew it was fine", which is the whole value of a gate.
+//
+// This is the same family as #13, where a verdict did not say which SURFACES it
+// covered. Both are a status detached from its subject, and both read as
+// broader than they are.
+//
+// ⚠ It does NOT decide what should happen when the head moves mid-wait —
+// whether to refuse ("the head moved from X to Y") or to follow it. Those are
+// different products and the question is open on #16; naming the commit is
+// useful under either, which is why it is here on its own.
+func at(p pr) string {
+	if !fullSHA(p.HeadRefOid) {
+		return ""
+	}
+	return " @" + short(p.HeadRefOid)
 }
 
 // fullSHA reports whether s is a whole 40-character hexadecimal commit.
@@ -723,13 +757,13 @@ func (w waiter) wait(refs []pr) bool {
 			got.Repo, got.Number = p.Repo, p.Number
 			switch v, why := assess(got, w.minChecks); v {
 			case passed:
-				fmt.Fprintf(w.out, "%s PASS %s\n", got, why)
+				fmt.Fprintf(w.out, "%s%s PASS %s\n", got, at(got), why)
 			case failed:
-				fmt.Fprintf(w.out, "%s FAIL %s\n", got, why)
+				fmt.Fprintf(w.out, "%s%s FAIL %s\n", got, at(got), why)
 				allOK = false
 			default:
 				if w.now().Sub(start) >= w.timeout {
-					fmt.Fprintf(w.out, "%s TIMEOUT after %s — %s\n", got, w.timeout, why)
+					fmt.Fprintf(w.out, "%s%s TIMEOUT after %s — %s\n", got, at(got), w.timeout, why)
 					allOK = false
 					continue
 				}
