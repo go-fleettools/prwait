@@ -20,6 +20,23 @@ sequence; the verdict happened to be right, and *"it was fine"* is not the same
 as *"I knew it was fine"*. A target with no commit to name (a conflicted pull
 request has no head to judge) prints none rather than an empty `@`.
 
+⛔ **And a head that moves mid-wait is refused, not followed.** Naming the
+commit is necessary and not sufficient: a wait that silently re-points at a
+push the caller never asked about ends by printing a true statement about the
+wrong work.
+
+```console
+$ prwait -repo go-tex/engine 752
+go-tex/engine#752 MOVED @e87aa0a -> @2baff07 — the head changed while waiting; this wait judged neither, re-run against @2baff07
+```
+
+Neither commit was judged as a whole, so neither is reported as a verdict, and
+the exit status is `1`. It holds for a branch (`@main`) and a run as much as for
+a pull request — a release gate waiting on the default branch must not answer
+about a commit that arrived after the one it was asked about, or the tag lands
+on something nobody judged. A SHA that one poll could not read is **not** a
+move: a blank answer is weather, and the retry loop already covers it.
+
 | exit | meaning |
 |---|---|
 | `0` | every pull request finished, with checks, and all of them acceptable |
