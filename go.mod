@@ -14,4 +14,16 @@ module github.com/go-fleettools/prwait
 // Certificate.Verify — fix RELEASED in 1.27.3. Same reasoning, second
 // occurrence in a fortnight: this line is not a floor chosen for the language
 // features it admits, it is the toolchain the security gate judges.
-go 1.27.3
+//
+// Raised to 1.27.4 on 2026-11-15 for GO-2026-6859 — net/http, fix RELEASED in
+// 1.27.4. ⛔ THIRD OCCURRENCE OF THIS EDIT IN THREE WEEKS, and the three
+// paragraphs above are the record of the first two. What found it was neither a
+// green check nor an alert: it was `modfloor --floor 1.27.4`, run by hand,
+// reading the go directive this repository PUBLISHED (v0.9.0) from the module
+// proxy — the only one of the three pins a consumer honours. Eight of the
+// eleven PUBLISHED modules of this organisation read BELOW at that moment, so
+// this is not a repository that fell behind, it is a maintenance act with no
+// clock on it.
+// The gate for that is modfloor on the nightly sweep, not a fourth paragraph
+// here.
+go 1.27.4
