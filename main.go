@@ -278,6 +278,19 @@ type pr struct {
 	Runs []wfrun `json:"-"`
 	// Branch is set instead of Number when the target is a branch.
 	Branch string
+	// Assoc are the pull requests GitHub associates with HeadRefOid, asked for
+	// only in branch mode. They are the raw answer; `branchMergeable` decides
+	// which of them is this branch's.
+	Assoc []assocPR `json:"associatedPullRequests"`
+	// AssocPR is the open pull request whose head this branch is, once one has
+	// been found. It is for the MESSAGE only: a reader told "CONFLICTING" about
+	// a BRANCH has no way to know where that came from, and the number is the
+	// thing they would go and look at.
+	//
+	// ⛔ DELIBERATELY NOT `Number`: that field selects the query shape, so
+	// writing a number into it would turn the next poll into a pull-request
+	// lookup and silently change what the wait is about.
+	AssocPR int
 	// Run is set instead of either when the target is a workflow RUN.
 	//
 	// ⛔ A DISPATCHED RUN HAS NO PULL REQUEST AND NO CHECKS, so neither of
@@ -288,6 +301,54 @@ type pr struct {
 	// about a build still compiling. An answer not yet given must not read
 	// as a negative.
 	Run int64
+}
+
+// assocPR is one pull request GitHub associates with a commit.
+type assocPR struct {
+	Number      int    `json:"number"`
+	State       string `json:"state"`
+	Mergeable   string `json:"mergeable"`
+	HeadRefName string `json:"headRefName"`
+}
+
+// branchMergeable answers "can what this branch would merge, merge?" from the
+// pull requests associated with its head commit.
+//
+// ⛔⛔ THE SELECTION IS BY HEAD, NOT BY ASSOCIATION. GitHub associates a commit
+// with every pull request that CONTAINS it, so a branch cut from main is
+// associated with whatever merged into main. Only a pull request whose
+// headRefName IS this branch says anything about what this branch would merge;
+// the rest are other people's.
+//
+// ⛔ AND AN UNANSWERED MERGEABILITY IS NOT "MERGEABLE". GitHub computes it
+// lazily and says UNKNOWN for a few seconds after a push, and an empty string
+// is what arrives if the field is ever absent. Both are carried through as
+// UNKNOWN, which `assess` already treats as "keep asking" — turning either into
+// MERGEABLE is the fabricated-positive this whole change exists to remove.
+//
+// Several open pull requests can share one head (same branch, different bases).
+// CONFLICTING wins, then UNKNOWN: a conflict against any base is worth stopping
+// for, and a wait that stops early costs a rebase while one that runs on costs
+// the timeout and a wrong theory.
+func branchMergeable(branch string, assoc []assocPR) (mergeable string, number int) {
+	mergeable, number = "MERGEABLE", 0
+	for _, a := range assoc {
+		if a.State != "OPEN" || a.HeadRefName != branch {
+			continue
+		}
+		m := a.Mergeable
+		if m == "" {
+			m = "UNKNOWN"
+		}
+		switch {
+		case m == "CONFLICTING":
+			// Decided: nothing a later entry says can soften it.
+			return m, a.Number
+		case mergeable != "UNKNOWN":
+			mergeable, number = m, a.Number
+		}
+	}
+	return mergeable, number
 }
 
 func (p pr) String() string {
@@ -339,6 +400,12 @@ func assess(p pr, minChecks int) (verdict, string) {
 	// rollup can be complete and entirely green while nothing has been
 	// built against what would actually be merged.
 	if p.Mergeable == "CONFLICTING" {
+		// ⚠ The number is named when the target was a BRANCH, because a reader
+		// told "CONFLICTING" about a branch has no way to know which pull
+		// request said so — and that number is the thing they would open.
+		if p.AssocPR != 0 {
+			return failed, fmt.Sprintf("CONFLICTING (#%d) — rebase it; any green ticks it shows are from the old base", p.AssocPR)
+		}
 		return failed, "CONFLICTING — rebase it; any green ticks it shows are from the old base"
 	}
 	if len(p.Rollup) < minChecks {
@@ -515,6 +582,16 @@ type fetcher func(t pr) (pr, error)
 // merged and has nothing to merge into, so "OPEN"/"MERGEABLE" are the values
 // that make assess ask only about the checks. Writing them here rather than
 // special-casing assess keeps one set of rules for both kinds of target.
+// ⛔⛔ associatedPullRequests IS WHY THE "nothing to merge into" PREMISE ABOVE
+// IS ONLY HALF TRUE. It is true of a bare branch and FALSE of a branch that is
+// the head of an open pull request — and the house rule steers every caller to
+// the @branch form, because guessing a pull request number is the worse hazard.
+// So the safest invocation was the one where the CONFLICTING refusal in
+// `assess` could never fire: the fabricated "MERGEABLE" below overrode the real
+// answer, and a conflicted pull request reported "0 checks, want at least 1"
+// until the timeout. Measured 2026-11-18 on go-zpkg/zpkb#505: thirty minutes of
+// silence, then three retriggers spent on a dropped-dispatch theory, while
+// `gh pr view --json mergeable` said CONFLICTING in one call.
 const branchQuery = `query($owner:String!,$name:String!,$ref:String!){
   repository(owner:$owner,name:$name){
     ref(qualifiedName:$ref){ target{ ... on Commit{ oid
@@ -523,6 +600,9 @@ const branchQuery = `query($owner:String!,$name:String!,$ref:String!){
         ... on CheckRun{ name status conclusion }
         ... on StatusContext{ context state }
       } } }
+      associatedPullRequests(first:10){ nodes{
+        number state mergeable headRefName
+      } }
     } } }
   }
 }`
@@ -531,8 +611,15 @@ const branchQuery = `query($owner:String!,$name:String!,$ref:String!){
 // the one field serves both kinds of target and the runs lookup needs no
 // special case. The query already selected `oid`; dropping it was what left
 // the branch form unable to name the commit it was judging.
+//
+// ⚠ "MERGEABLE" STAYS HERE AS THE BARE-BRANCH DEFAULT and is refined in
+// `decode`, not in jq. The selection — which of the associated pull requests
+// is actually this branch's — is a rule, and every rule in this file is in Go
+// where a literal can test it. Interpolating a branch name into a jq program
+// to do it would also be an injection site for an argument.
 const branchJQ = `{mergeable:"MERGEABLE",state:"OPEN",` +
 	`headRefOid:(.data.repository.ref.target.oid // ""),` +
+	`associatedPullRequests:(.data.repository.ref.target.associatedPullRequests.nodes // []),` +
 	`statusCheckRollup:(.data.repository.ref.target.statusCheckRollup.contexts.nodes // [])}`
 
 // runJQ reshapes `gh run view` into the object every rule here already
@@ -711,6 +798,13 @@ func decode(out []byte, t pr) (pr, error) {
 	// report would call a run "repo#0" and the next poll would ask about
 	// pull request zero.
 	p.Repo, p.Number, p.Branch, p.Run = t.Repo, t.Number, t.Branch, t.Run
+	// ⛔⛔ BRANCH MODE ONLY, AND AFTER THE CARRY-BACK BECAUSE IT NEEDS p.Branch.
+	// `branchJQ` supplies a fabricated "MERGEABLE" — right for a bare branch,
+	// and a LIE when the branch is the head of an open pull request. Refined
+	// here rather than in jq so the rule is testable against a literal.
+	if p.Branch != "" {
+		p.Mergeable, p.AssocPR = branchMergeable(p.Branch, p.Assoc)
+	}
 	return p, nil
 }
 

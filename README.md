@@ -122,6 +122,29 @@ did its job.
 **`UNKNOWN` mergeability is not an answer.** GitHub computes mergeability lazily; green
 checks plus `UNKNOWN` means it has not yet been decided whether the branch can land.
 
+**A `@branch` whose head is a conflicted pull request is refused, and it was not.**
+GitHub runs `pull_request` workflows against `refs/pull/N/merge`, which does not exist
+while the merge cannot be computed — so a conflicted pull request has **no runs at all**,
+by construction. `prwait` has refused `CONFLICTING` before counting checks since its first
+release, but the branch form supplied a fabricated `mergeable: "MERGEABLE"` — right for a
+bare branch, which has nothing to merge into, and a lie when the branch is a pull
+request's head. So the refusal was unreachable from the form that avoids guessing a
+number, which is the form the fleet's own rule prescribes.
+
+Measured 2026-11-18 on `go-zpkg/zpkb#505`: `TIMEOUT after 30m0s — 0 checks, want at
+least 1`, then three retriggers spent on a dropped-dispatch theory — Actions enabled,
+all workflows `active`, repository public, githubstatus `operational`, a sibling
+repository running 34 minutes earlier — while `gh pr view --json mergeable` answered
+`CONFLICTING` in one call. It now says
+`CONFLICTING (#505) — rebase it; …`, naming the pull request, because a reader told
+"CONFLICTING" about a *branch* has no way to know which one said so.
+
+⚠ The selection is by **head**, not by association: GitHub associates a commit with every
+pull request that contains it, so a branch cut from `main` is associated with whatever
+merged into `main`. Only a pull request whose `headRefName` is this branch says anything
+about what this branch would merge. A bare branch still behaves exactly as before — that
+is what the fabricated value was for, and a test holds it.
+
 **A timeout is a failure, not a hang and not a pass.**
 
 **An error from `gh` is reported, and sinks the run.** Not silence, not a retry forever.
