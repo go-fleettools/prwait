@@ -262,6 +262,65 @@ func runEntries(rs []wfrun) []entry {
 	return es
 }
 
+// rerunWindow is how long GitHub lets a workflow run be re-run. Past it,
+// `gh run rerun` answers 403 "Unable to retry this workflow run because it
+// was created over a month ago".
+const rerunWindow = 30 * 24 * time.Hour
+
+// logRetention is GitHub's DEFAULT retention for a run's logs. A repository
+// can shorten it, and an enterprise can lengthen it, which is why the advice
+// below says "kept 90 days by default" rather than claiming they are gone.
+const logRetention = 90 * 24 * time.Hour
+
+// redRunAdvice says, for each FAILING run, whether its verdict can still be
+// refreshed where it stands.
+//
+// ⛔ IT EXISTS BECAUSE THE QUESTION WENT UNASKED FOR TEN DAYS.
+// go-ansible/playbook#197 sat red on one lane, `test (macos-latest)`, and was
+// handed back twice as "blocked: three routes tried, all closed" — all three
+// routes being ways to make THAT run go green. Nobody asked whether that run
+// could be re-run at all (it could not: created 2026-10-12, over the window)
+// or whether its logs could still be read (they could not). The change itself
+// was fine: cherry-picked onto a branch in the target repository it came back
+// 9/9 green, `macos-latest` included.
+//
+// Three failures that share one premise are not three tests — they are one
+// untested premise, counted three times. So this prints the premise.
+//
+// It costs NO extra request: `created_at` already arrives with every run.
+// Nothing is asserted about logs that are merely old; the age and the two
+// documented limits are printed, and the reader concludes.
+func redRunAdvice(runs []wfrun, now time.Time) []string {
+	var out []string
+	for _, r := range runs {
+		if !strings.EqualFold(r.Conclusion, "failure") {
+			continue
+		}
+		created, err := time.Parse(time.RFC3339, r.Created)
+		if err != nil {
+			// No opinion rather than a guess: absence is never evidence.
+			continue
+		}
+		age := now.Sub(created)
+		if age < rerunWindow {
+			continue
+		}
+		name := r.Name
+		if name == "" {
+			name = "(unnamed)"
+		}
+		line := fmt.Sprintf(
+			"  ⛔ %s (%s run #%d) was created %s, %d days ago: `gh run rerun` will answer 403 (GitHub allows a re-run for %d days)",
+			name, r.Event, r.Number, created.Format("2006-01-02"), int(age.Hours()/24), int(rerunWindow.Hours()/24))
+		if age >= logRetention {
+			line += fmt.Sprintf(", and its logs are past the %d-day default retention", int(logRetention.Hours()/24))
+		}
+		line += ".\n     This red cannot be refreshed where it stands. Reproduce the lane locally if it names your platform, or put the commit on a ref you control — `git cherry-pick` onto a branch in this repository — and let CI judge it there."
+		out = append(out, line)
+	}
+	return out
+}
+
 type pr struct {
 	Repo      string
 	Number    int
@@ -894,6 +953,13 @@ func (w waiter) wait(refs []pr) bool {
 				fmt.Fprintf(w.out, "%s%s PASS %s\n", got, at(got), why)
 			case failed:
 				fmt.Fprintf(w.out, "%s%s FAIL %s\n", got, at(got), why)
+				// A red whose run is past the re-run window is a different
+				// situation from a red you can retrigger, and saying so here
+				// is the whole point: this is the moment somebody decides
+				// whether they are blocked.
+				for _, line := range redRunAdvice(got.Runs, w.now()) {
+					fmt.Fprintln(w.out, line)
+				}
 				allOK = false
 			default:
 				if w.now().Sub(start) >= w.timeout {
