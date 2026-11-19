@@ -20,6 +20,27 @@ sequence; the verdict happened to be right, and *"it was fine"* is not the same
 as *"I knew it was fine"*. A target with no commit to name (a conflicted pull
 request has no head to judge) prints none rather than an empty `@`.
 
+⛔ **A red that can no longer be re-run says so.** Past GitHub's 30-day
+re-run window, `gh run rerun` answers `403 Unable to retry this workflow run
+because it was created over a month ago` — so the red is permanent where it
+stands, and the only way to a fresh verdict is a ref you control.
+
+```console
+$ prwait -repo go-ansible/playbook 197
+go-ansible/playbook#197 @c5dd86d FAIL test (macos-latest)=FAILURE
+  ⛔ ci (pull_request run #412) was created 2026-10-12, 37 days ago: `gh run rerun` will answer 403 (GitHub allows a re-run for 30 days).
+     This red cannot be refreshed where it stands. Reproduce the lane locally if it names your platform, or put the commit on a ref you control — `git cherry-pick` onto a branch in this repository — and let CI judge it there.
+```
+
+That line exists because the question went unasked for ten days on that very
+pull request. It was handed back twice as *"blocked: three routes tried, all
+closed"* — and all three routes were ways to make **that** run go green, so
+they shared one premise and tested it once. Cherry-picked onto a branch in the
+target repository, the same commit came back **9/9 green, `macos-latest`
+included**: the red belonged to the stale base, not to the change. Nothing
+is claimed about logs that are merely old; past the 90-day default retention
+the line says so, and otherwise it reports the age and lets you conclude.
+
 ⛔ **And a head that moves mid-wait is refused, not followed.** Naming the
 commit is necessary and not sufficient: a wait that silently re-points at a
 push the caller never asked about ends by printing a true statement about the
