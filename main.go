@@ -994,11 +994,22 @@ func (w waiter) run(refs []pr) outcome {
 						fmt.Fprintln(w.out, line)
 					}
 					quotaHolds[p.String()]++
-					if d, ok := q.hold(w.now(), start.Add(w.timeout), quotaHolds[p.String()]); ok {
-						fmt.Fprintf(w.out, "     holding %s for it, then asking again.\n", d.Round(time.Second))
-						w.sleep(d)
-						still = append(still, p)
-						continue
+					// ⛔⛔ THE WAIT'S OWN CLOCK IS ASKED HERE TOO, not only
+					// inside hold. Every other branch of this loop checks it,
+					// and this one used to delegate its only bound to another
+					// function: mutsweep HUNG on hold's deadline test —
+					// removing that one comparison made the wait run forever,
+					// because nothing else could stop it. A loop whose
+					// termination rests on a single condition in a different
+					// function terminates until the day that condition is
+					// wrong.
+					if w.now().Sub(start) < w.timeout {
+						if d, ok := q.hold(w.now(), start.Add(w.timeout), quotaHolds[p.String()]); ok {
+							fmt.Fprintf(w.out, "     holding %s for it, then asking again.\n", d.Round(time.Second))
+							w.sleep(d)
+							still = append(still, p)
+							continue
+						}
 					}
 					// Every target shares one quota, so there is nothing to
 					// be learned by asking about the others: stop, and name

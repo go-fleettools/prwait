@@ -497,6 +497,17 @@ func TestMain(m *testing.M) {
 	case "fail":
 		fmt.Fprintln(os.Stderr, "gh: could not resolve to a PullRequest")
 		os.Exit(1)
+	case "ratelimit":
+		// What this machine actually answered at 20:06 CET on 2026-11-21.
+		fmt.Println(`{"resources":{` +
+			`"core":{"limit":5000,"remaining":3748,"reset":1795289130,"used":1252},` +
+			`"graphql":{"limit":5000,"remaining":4900,"reset":1795289200,"used":100}}}`)
+		os.Exit(0)
+	case "quotafail":
+		// GitHub's refusal, as gh hands it over: the text is the only
+		// evidence the classification here can work from.
+		fmt.Fprintln(os.Stderr, "gh: API rate limit exceeded for user ID 11405852. (HTTP 403)")
+		os.Exit(1)
 	case "nosha":
 		// Green checks, no head commit: the case that must be refused
 		// rather than judged on those checks.

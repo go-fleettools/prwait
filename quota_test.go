@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -123,6 +124,17 @@ func TestWhatAFailedQueryIsClassifiedAs(t *testing.T) {
 		err:           errors.New(primaryMsg),
 		read:          brokenBudget(errors.New("gh: rate_limit: network is unreachable")),
 		wantKind:      primaryQuota,
+		wantBudgetErr: true,
+	}, {
+		// ⛔ THE SAME BRANCH, WITH GitHub HAVING NAMED THE LIMIT. Found by
+		// mutsweep: forcing this `named` to false changed no test, because
+		// every unreadable-instrument case used an UNNAMED message. One
+		// branch of one guard, reachable in production the first time a
+		// secondary limit and a network blip arrive together.
+		name:          "a named secondary limit with the instrument unreadable",
+		err:           errors.New(secondaryMsg),
+		read:          brokenBudget(errors.New("gh: rate_limit: network is unreachable")),
+		wantKind:      secondaryQuota,
 		wantBudgetErr: true,
 	}, {
 		name:     "no instrument at all still classifies from the message",
@@ -326,6 +338,86 @@ func TestTheBudgetIsReadFromGhsOwnAnswer(t *testing.T) {
 	}
 	if _, err := decodeBudget([]byte(`not json`)); err == nil {
 		t.Error("an unreadable answer was accepted")
+	}
+}
+
+// The exec seam, because decodeBudget being right proves nothing about the
+// command that feeds it. Driven through the test binary itself, which is this
+// package's established stand-in for gh.
+func TestTheBudgetIsReadThroughGh(t *testing.T) {
+	t.Setenv("PRWAIT_HELPER", "ratelimit")
+	b, err := ghBudget(os.Args[0])()
+	if err != nil {
+		t.Fatalf("ghBudget: %v", err)
+	}
+	if b.Core.Remaining != 3748 || b.GraphQL.Remaining != 4900 {
+		t.Errorf("budget = %+v", b)
+	}
+}
+
+// ⛔ AND A gh THAT FAILS IS AN ERROR, NOT AN EMPTY BUDGET. Found by mutsweep:
+// nothing exercised this guard, so removing it returned budget{} — every
+// field zero, which classifyQuota would read as "both budgets spent" and
+// report as a confirmed primary quota. An unreadable instrument inventing a
+// measurement is the worst of the available outcomes.
+func TestAghThatFailsIsNotAnEmptyBudget(t *testing.T) {
+	t.Setenv("PRWAIT_HELPER", "quotafail")
+	b, err := ghBudget(os.Args[0])()
+	if err == nil {
+		t.Fatalf("a gh that exited 1 was read as a budget: %+v", b)
+	}
+	// gh's own words, so the reader can tell a quota from a missing token.
+	if !strings.Contains(err.Error(), "rate limit") {
+		t.Errorf("gh's message was lost: %v", err)
+	}
+	// And the classification must then admit it could not look, rather than
+	// treating the zeroes as a reading.
+	q := classifyQuota(errors.New(primaryMsg), ghBudget(os.Args[0]))
+	if q.budgetErr == nil {
+		t.Error("the unreadable instrument was not recorded")
+	}
+	if !q.reset.IsZero() {
+		t.Errorf("a reset of %v came from a budget that could not be read", q.reset)
+	}
+}
+
+// ⛔⛔ A WAIT MUST END, AND ONLY ONE CHECK MAKES IT END. mutsweep HUNG on the
+// deadline test inside hold: nothing else in the loop stops a target that is
+// refused over and over, so removing it runs forever. A hang is not a test
+// result, so the sleep itself asserts the bound.
+func TestRepeatedQuotasStillEndTheWaitWithinItsTimeout(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	now := start
+	calls := 0
+	w := testWaiter(func(pr) (pr, error) {
+		calls++
+		return pr{}, errors.New(secondaryMsg)
+	})
+	w.budget = fixedBudget(budget{
+		Core:    resource{Limit: 5000, Remaining: 4000, Reset: start.Add(20 * time.Minute)},
+		GraphQL: resource{Limit: 5000, Remaining: 4900, Reset: start.Add(20 * time.Minute)},
+	})
+	w.now = func() time.Time { return now }
+	w.timeout = 3 * time.Minute
+	w.interval = 0
+	w.sleep = func(d time.Duration) {
+		now = now.Add(d)
+		if now.Sub(start) > 2*w.timeout {
+			t.Fatalf("the wait slept %s, past twice its own %s timeout", now.Sub(start), w.timeout)
+		}
+	}
+	out := &strings.Builder{}
+	w.out = out
+
+	if got := w.run([]pr{{Repo: "a/b", Number: 1}}); got != quotaStopped {
+		t.Fatalf("outcome = %v, want quotaStopped:\n%s", got, out)
+	}
+	// The documented minute, then two: the second hold would land exactly on
+	// the 3m deadline, so it is refused instead of taken. That is the whole
+	// bound, arrived at from the backoff and the timeout rather than copied
+	// out of the implementation.
+	if calls != 2 {
+		t.Errorf("spent %d calls, want 2", calls)
 	}
 }
 
