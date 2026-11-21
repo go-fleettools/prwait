@@ -102,10 +102,18 @@ flags:
   -min-checks 1      how many checks must EXIST before a pass is possible
   -gh gh             the gh binary to ask
 
+⛔ A QUOTA IS NOT A VERDICT. When GitHub refuses a call for the rate limit,
+nothing about the target was measured, so no verdict is printed and the exit
+status is 3 — never 1, which means "measured, and not green". A quota has an
+advertised reset, so it is held for and then retried when the reset falls
+inside the timeout, and refused early when it does not. A measured red still
+outranks it: if anything was read as failing, the status stays 1.
+
 exit status:
   0  every target finished, with checks, all green
   1  one finished red, or conflicts, or ran out of time
   2  refused: bad usage, gh missing, or an answer that could not be read
+  3  the API quota stopped the wait: nothing was measured, nothing is claimed
 `
 
 // A rollup entry is one of two shapes and they do NOT share a field.
@@ -869,6 +877,7 @@ func decode(out []byte, t pr) (pr, error) {
 
 type waiter struct {
 	fetch     fetcher
+	budget    budgetReader
 	interval  time.Duration
 	timeout   time.Duration
 	minChecks int
@@ -877,13 +886,55 @@ type waiter struct {
 	now       func() time.Time
 }
 
-// wait polls until every pull request has settled or the clock runs out.
-// It returns true when all of them passed.
+// outcome is what a whole wait came to. It exists because "not green" and
+// "not measured" are different facts and were sharing one exit status.
+type outcome int
+
+const (
+	allGreen outcome = iota
+	someRed
+	// quotaStopped is a wait that ended without a verdict because the API
+	// quota refused the calls. Nothing was measured, so nothing is claimed.
+	quotaStopped
+)
+
+// status is the process exit status for an outcome.
+func (o outcome) status() int {
+	switch o {
+	case allGreen:
+		return 0
+	case quotaStopped:
+		return quotaStatus
+	default:
+		return 1
+	}
+}
+
+// wait is the boolean question — "did everything pass?" — and is what the
+// callers that only merge on green ask.
+//
+// ⚠ It cannot distinguish a red check from a quota, which is exactly why it
+// is not what main reads. Use run for that.
 func (w waiter) wait(refs []pr) bool {
+	return w.run(refs) == allGreen
+}
+
+// run polls until every pull request has settled or the clock runs out.
+func (w waiter) run(refs []pr) outcome {
 	start := w.now()
 	left := make([]pr, len(refs))
 	copy(left, refs)
 	allOK := true
+	// measuredBad is set only by an answer that was actually read: a red
+	// check, a conflict, a moved head, a timeout, or a query that failed for
+	// something other than the quota.
+	//
+	// ⛔ IT OUTRANKS quotaStop. A red check is a fact and stays reported as
+	// one even if the quota then stopped the rest of the wait; a quota only
+	// decides the outcome when nothing was measured to be wrong. The reverse
+	// would let a real red hide behind a rate limit.
+	measuredBad := false
+	quotaStop := false
 	// A FETCH ERROR IS OFTEN WEATHER, NOT AN ANSWER.
 	//
 	// Observed in one 25-minute wait: GitHub answered HTTP 401 once, and
@@ -901,6 +952,11 @@ func (w waiter) wait(refs []pr) bool {
 	// run fails if the errors do not stop. Consecutive, not cumulative —
 	// a blip an hour apart is weather, three in a row is a wall.
 	fails := map[string]int{}
+	// quotaHolds counts CONSECUTIVE quota refusals per target, for the
+	// documented doubling of the secondary-limit wait. It is separate from
+	// fails because a quota is not weather and must not consume the weather
+	// budget — that conflation is what turned one 403 into four.
+	quotaHolds := map[string]int{}
 	// ⛔ A WAIT IS ABOUT A COMMIT, AND A MOVED HEAD IS A DIFFERENT COMMIT.
 	//
 	// #17 made the verdict NAME the commit it judged. Naming it is not enough
@@ -919,11 +975,54 @@ func (w waiter) wait(refs []pr) bool {
 	// release gate waiting on main must not answer about a commit that arrived
 	// after the one it was asked about. That is the whole of the risk.
 	firstHead := map[string]string{}
-	for len(left) > 0 {
+	// unjudged collects the targets a quota stop left without a verdict, so
+	// the report names them. Leaving them out would be the same defect in
+	// miniature: silence about a target reads as consent.
+	var unjudged []pr
+	for len(left) > 0 && !quotaStop {
 		var still []pr
-		for _, p := range left {
+		for i, p := range left {
 			got, err := w.fetch(p)
 			if err != nil {
+				// ⛔ THE QUOTA IS TESTED BEFORE THE WEATHER, because it is
+				// not weather: it has an advertised reset, and asking again
+				// spends a call against the limit that is already refusing.
+				// Left in the weather path it was retried three times and
+				// then reported under the exit status of a red check.
+				if q := classifyQuota(err, w.budget); q.kind != notQuota {
+					for _, line := range q.lines(p.String(), w.now()) {
+						fmt.Fprintln(w.out, line)
+					}
+					quotaHolds[p.String()]++
+					// ⛔⛔ THE WAIT'S OWN CLOCK IS ASKED HERE TOO, not only
+					// inside hold. Every other branch of this loop checks it,
+					// and this one used to delegate its only bound to another
+					// function: mutsweep HUNG on hold's deadline test —
+					// removing that one comparison made the wait run forever,
+					// because nothing else could stop it. A loop whose
+					// termination rests on a single condition in a different
+					// function terminates until the day that condition is
+					// wrong.
+					if w.now().Sub(start) < w.timeout {
+						if d, ok := q.hold(w.now(), start.Add(w.timeout), quotaHolds[p.String()]); ok {
+							fmt.Fprintf(w.out, "     holding %s for it, then asking again.\n", d.Round(time.Second))
+							w.sleep(d)
+							still = append(still, p)
+							continue
+						}
+					}
+					// Every target shares one quota, so there is nothing to
+					// be learned by asking about the others: stop, and name
+					// the ones that got no verdict rather than leaving them
+					// out of the report.
+					quotaStop = true
+					allOK = false
+					// This target and every one after it in this round, plus
+					// the ones already pending, end with nothing measured.
+					unjudged = append(unjudged, left[i:]...)
+					unjudged = append(unjudged, still...)
+					break
+				}
 				fails[p.String()]++
 				if n := fails[p.String()]; n < fetchRetries && w.now().Sub(start) < w.timeout {
 					fmt.Fprintf(w.out, "%s asking again (%d/%d): %v\n", p, n, fetchRetries, err)
@@ -932,9 +1031,11 @@ func (w waiter) wait(refs []pr) bool {
 				}
 				fmt.Fprintf(w.out, "%s %v\n", p, err)
 				allOK = false
+				measuredBad = true
 				continue
 			}
 			fails[p.String()] = 0
+			quotaHolds[p.String()] = 0
 			got.Repo, got.Number = p.Repo, p.Number
 			if fullSHA(got.HeadRefOid) {
 				key := p.String()
@@ -945,6 +1046,7 @@ func (w waiter) wait(refs []pr) bool {
 					fmt.Fprintf(w.out, "%s MOVED @%s -> @%s — the head changed while waiting; this wait judged neither, re-run against @%s\n",
 						got, short(was), short(got.HeadRefOid), short(got.HeadRefOid))
 					allOK = false
+					measuredBad = true
 					continue
 				}
 			}
@@ -961,10 +1063,12 @@ func (w waiter) wait(refs []pr) bool {
 					fmt.Fprintln(w.out, line)
 				}
 				allOK = false
+				measuredBad = true
 			default:
 				if w.now().Sub(start) >= w.timeout {
 					fmt.Fprintf(w.out, "%s%s TIMEOUT after %s — %s\n", got, at(got), w.timeout, why)
 					allOK = false
+					measuredBad = true
 					continue
 				}
 				still = append(still, p)
@@ -975,7 +1079,27 @@ func (w waiter) wait(refs []pr) bool {
 			w.sleep(w.interval)
 		}
 	}
-	return allOK
+	if quotaStop && len(unjudged) > 0 {
+		fmt.Fprintf(w.out, "⛔ %d target(s) got no verdict at all: %s — the quota stopped the wait before they were read.\n",
+			len(unjudged), targetList(unjudged))
+	}
+	switch {
+	case allOK:
+		return allGreen
+	case quotaStop && !measuredBad:
+		return quotaStopped
+	default:
+		return someRed
+	}
+}
+
+// targetList names targets in a report.
+func targetList(ps []pr) string {
+	names := make([]string, 0, len(ps))
+	for _, p := range ps {
+		names = append(names, p.String())
+	}
+	return strings.Join(names, ", ")
 }
 
 func main() {
@@ -1011,8 +1135,21 @@ func main() {
 		}
 		refs = append(refs, t)
 	}
+	// The budget is read before the first call is spent, and again whenever a
+	// query is refused, because GET /rate_limit is free and a quota that is
+	// merely guessed at is how a rate limit came to be reported as a red
+	// check.
+	read := ghBudget(*ghBin)
+	lines, refuse := preflight(read, time.Now())
+	for _, line := range lines {
+		fmt.Fprintln(os.Stderr, line)
+	}
+	if refuse {
+		os.Exit(quotaStatus)
+	}
 	w := waiter{
 		fetch:     ghFetcher(*ghBin),
+		budget:    read,
 		interval:  *interval,
 		timeout:   *timeout,
 		minChecks: *minChecks,
@@ -1020,8 +1157,10 @@ func main() {
 		sleep:     time.Sleep,
 		now:       time.Now,
 	}
-	if !w.wait(refs) {
-		os.Exit(1)
+	// ⛔ run, not wait: the boolean cannot tell a red check from a quota, and
+	// collapsing them is the defect this change removes.
+	if code := w.run(refs).status(); code != 0 {
+		os.Exit(code)
 	}
 }
 
