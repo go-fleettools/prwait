@@ -8,6 +8,11 @@
 *.so
 *.dylib
 
+# ⛔ The binary `go build .` leaves here, which the upstream Go template does
+# not cover because it cannot know the module's name. Without this line a
+# `git add -A` after a build stages a 3 MB executable, and it was staged once.
+/prwait
+
 # Test binary, built with `go test -c`
 *.test
 

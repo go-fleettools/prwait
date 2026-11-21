@@ -58,11 +58,55 @@ about a commit that arrived after the one it was asked about, or the tag lands
 on something nobody judged. A SHA that one poll could not read is **not** a
 move: a blank answer is weather, and the retry loop already covers it.
 
+⛔ **And a rate limit is not a verdict.** When GitHub refuses the call for the
+quota, nothing about the target was measured, so nothing is claimed about it:
+
+```console
+$ prwait -repo go-embedded-julia/julia 78 79 80 82
+go-embedded-julia/julia#78 QUOTA — not a verdict: nothing about this target was measured.
+  ⛔ the per-user REST quota is spent (0 of 5000 left). It resets at 20:45 CET, in 38m12s.
+     The quota is per USER, not per token, so every session on this machine shares it — Renovate included.
+⛔ 4 target(s) got no verdict at all: …#78, …#79, …#80, …#82 — the quota stopped the wait before they were read.
+```
+
+Measured 2026-11-15: the account's REST quota hit zero twice in one day, and
+both times this tool printed the raw `gh: API rate limit exceeded … (HTTP 403)`
+*where its verdict goes*, under **exit 1 — the status of a red check**. A
+caller reading only the status took "nothing could be measured" for "the pull
+request is red", which is this tool's own defect wearing its least
+recognisable face: an **unread** answer presenting itself as a **negative**
+one.
+
+The retry made it worse. A failed query is weather here, so a quota was asked
+again three times at the poll interval — three more refusals, each spending a
+call against the very limit that was refusing, each printed as `asking again`.
+**Weather has no reset time; a quota has one, advertised.** So a quota now gets
+its own classification, its own hold, and its own exit status:
+
+- **Held for, when the reset fits.** The wait sleeps to the advertised reset
+  and resumes. Costs nothing, and keeps the verdict.
+- **Refused early, when it does not.** Spending the rest of the timeout to
+  learn what `/rate_limit` already said is how four calls bought one fact.
+- **A secondary limit is reported as a secondary limit.** `/rate_limit` cannot
+  see it — *"There is not a way to check the status of your secondary rate
+  limit"* — so when GitHub refuses for a rate limit while the instrument
+  reports room, that is said in those words, and marked as **deduced**. No
+  reset is ever borrowed from the primary limit to stand in for one that does
+  not exist.
+- **A measured red still outranks it.** If anything was actually read as
+  failing, the status stays `1`.
+
+⚠ `GET /rate_limit` is free of the *primary* limit only — *"Calling this
+endpoint does not count against your primary rate limit, but it can count
+against your secondary rate limit"* — so it is read once before the wait and
+once per refusal, never per poll.
+
 | exit | meaning |
 |---|---|
 | `0` | every pull request finished, with checks, and all of them acceptable |
 | `1` | one finished red, conflicts, was closed, or ran out of time |
 | `2` | refused: bad usage, or an answer that could not be read |
+| `3` | the API quota stopped the wait: nothing was measured, nothing is claimed |
 
 ## Why it exists
 
