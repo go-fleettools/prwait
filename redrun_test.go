@@ -159,7 +159,10 @@ func TestTheWaitItselfPrintsTheAdvice(t *testing.T) {
 	})
 	out := &strings.Builder{}
 	w.out = out
-	w.now = func() time.Time { return now }
+	// A clock that moves a second per reading, so a wait that never settles
+	// reaches its timeout instead of spinning on a frozen one.
+	clock := now
+	w.now = func() time.Time { clock = clock.Add(time.Second); return clock }
 
 	if w.wait([]pr{{Repo: "go-ansible/playbook", Number: 197}}) {
 		t.Fatal("a failing run was reported as a pass")
@@ -201,7 +204,10 @@ func TestAFreshRedPrintsNoAdvice(t *testing.T) {
 	})
 	out := &strings.Builder{}
 	w.out = out
-	w.now = func() time.Time { return now }
+	// A clock that moves a second per reading, so a wait that never settles
+	// reaches its timeout instead of spinning on a frozen one.
+	clock := now
+	w.now = func() time.Time { clock = clock.Add(time.Second); return clock }
 
 	if w.wait([]pr{{Repo: "a/b", Number: 1}}) {
 		t.Fatal("a failing run was reported as a pass")

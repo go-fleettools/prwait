@@ -101,6 +101,30 @@ endpoint does not count against your primary rate limit, but it can count
 against your secondary rate limit"* — so it is read once before the wait and
 once per refusal, never per poll.
 
+⛔ **And the default interval now grows with the number of targets**, because a
+poll reads *every* target: `-interval` reads as "how often to ask" and is really
+"how much of a shared budget to spend", so one value cannot mean the same thing
+for one target and for four. `prwait -repo O/R 78 79 80 82` cost exactly what the
+four separate processes in the incident above cost. The default is **45 s for one
+target and 45 s per target** beyond that, capped at **5 minutes** — linear growth
+is right for the budget and wrong for a human past a few minutes, since at twenty
+targets it would put a quarter of an hour between polls and a verdict ready at
+minute 1 would arrive at minute 15. The chosen interval, the reason and the
+override are printed; an explicitly given `-interval` is used **as typed**, since
+a caller who names one has said what they want of the budget.
+
+What one poll of one target spends, counted from the code rather than assumed:
+
+| target | GraphQL | REST |
+| --- | --- | --- |
+| a pull request or a branch | 1 — the check list (`statusCheckRollup` exists only in the GraphQL schema) | 1 — `actions/runs?head_sha=` |
+| a workflow run (`!<id>`) | — | 1, and no runs read: a run target is already a run |
+
+⚠ **The two budgets are separate and are never summed**: 5000 REST calls an hour
+and 5000 GraphQL points, either of which can be spent while the other is
+untouched. The scaling is set by the REST half, because that is the half that was
+measured at zero.
+
 | exit | meaning |
 |---|---|
 | `0` | every pull request finished, with checks, and all of them acceptable |
@@ -266,7 +290,7 @@ conclusion a running job really sends.
 | flag | default | |
 |---|---|---|
 | `-repo` | | repository for bare numbers |
-| `-interval` | `45s` | how often to ask |
+| `-interval` | `45s` × targets, capped at `5m` | how often to ask. A poll reads every target, so the default holds a wait's REST cost at about what one target costs; given explicitly it is used as typed |
 | `-timeout` | `30m` | give up after this, per run |
 | `-min-checks` | `1` | how many checks must **exist** before a pass is possible |
 | `-gh` | `gh` | the `gh` binary to ask |
