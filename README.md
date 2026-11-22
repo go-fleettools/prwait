@@ -113,6 +113,35 @@ minute 1 would arrive at minute 15. The chosen interval, the reason and the
 override are printed; an explicitly given `-interval` is used **as typed**, since
 a caller who names one has said what they want of the budget.
 
+⛔ **And the count that paces a wait is the user's, not the process's.** Scaling
+one wait by its own targets is right and was not enough: the incident above was
+**four processes**, each pacing itself correctly for the one target it knew
+about, and on 2026-11-22 the same quota reached 0 of 5000 again with about
+twenty-five sessions on the machine. So every wait now records itself in
+`<user cache>/prwait/waits.json` — per user by construction, which is the
+quota's own granularity — and counts the targets the other live waits are
+already polling into its own interval:
+
+```text
+prwait: 1 other wait(s) of this user are already polling 3 target(s) (pid 4711, started 3m0s ago, 3 target(s): go-x/y#78 go-x/y#79 go-x/y#80) — the REST budget is per USER, shared with every session here and with Renovate, so one wait can take every target: `prwait -repo O/R 78 79 80 82` costs what this wait alone costs and reports them together.
+prwait: pacing this wait for 4 target(s) in all (1 here, 3 elsewhere), so the interval is 3m0s rather than 45s. -interval overrides this.
+```
+
+⛔ **It warns and paces; it does not refuse.** A second wait could have been
+rejected outright, and with ~25 sessions sharing this machine one 30-minute wait
+would then lock every other session out of the only tool they are told to wait
+with — and the first thing that happens to a gate nobody can keep green is that
+it gets switched off, by a flag or by going back to `gh pr checks --watch`, which
+is the defect this tool exists to prevent.
+
+⛔ **Nothing about that bookkeeping can fail a wait.** No cache directory, an
+unreadable file, a lock held by a wait that was killed: each is a line printed
+beside the verdict, and the wait runs. An entry is dropped when its deadline
+(its wait's `-timeout` plus one poll interval) has passed, or when its process is
+gone — and *"the process is gone"* is only ever allowed to drop an entry the
+deadline would have kept, because the platforms that cannot answer it answer
+"cannot tell" rather than "dead".
+
 What one poll of one target spends, counted from the code rather than assumed:
 
 | target | GraphQL | REST |
@@ -290,7 +319,7 @@ conclusion a running job really sends.
 | flag | default | |
 |---|---|---|
 | `-repo` | | repository for bare numbers |
-| `-interval` | `45s` × targets, capped at `5m` | how often to ask. A poll reads every target, so the default holds a wait's REST cost at about what one target costs; given explicitly it is used as typed |
+| `-interval` | `45s` × targets, capped at `5m` | how often to ask. A poll reads every target, and the targets of this user's other live waits count too, so the default holds the USER's REST cost at about what one target costs; given explicitly it is used as typed |
 | `-timeout` | `30m` | give up after this, per run |
 | `-min-checks` | `1` | how many checks must **exist** before a pass is possible |
 | `-gh` | `gh` | the `gh` binary to ask |

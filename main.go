@@ -99,7 +99,9 @@ flags:
   -repo OWNER/REPO   repository for bare targets
   -interval 45s×N    how often to ask: 45s for one target, 45s per target up to
                      a 5m cap, because a poll reads EVERY target and the REST
-                     budget is per user. Given explicitly, it is used as typed.
+                     budget is per user — the targets of the OTHER live waits of
+                     this user count too, read from <user cache>/prwait/waits.json.
+                     Given explicitly, it is used as typed.
   -timeout 30m       give up after this, per run
   -min-checks 1      how many checks must EXIST before a pass is possible
   -gh gh             the gh binary to ask
@@ -1148,9 +1150,38 @@ func main() {
 			intervalSet = true
 		}
 	})
-	chosen, why := chosenInterval(intervalSet, *interval, len(refs))
-	if why != "" {
-		fmt.Fprintln(os.Stderr, why)
+	// ⛔ AND THE TARGET COUNT IS THE USER'S, NOT THIS PROCESS'S. A wait that
+	// paces itself perfectly for its own targets still drained the shared quota
+	// four times over, because four of them ran at once (#20). The registry is
+	// advisory in both directions: it never refuses a wait, and no failure of it
+	// ever reaches the exit status — see registry.go.
+	startedAt := time.Now()
+	path, perr := registryPath()
+	if perr != nil {
+		fmt.Fprintf(os.Stderr, "prwait: no user cache directory (%v), so this wait cannot be counted with the other waits of this user.\n", perr)
+		path = ""
+	}
+	targets := make([]string, 0, len(refs))
+	for _, p := range refs {
+		targets = append(targets, p.String())
+	}
+	reg := enter(path, waitEntry{
+		PID:      os.Getpid(),
+		Started:  startedAt,
+		Deadline: startedAt.Add(*timeout + registryGrace),
+		Targets:  targets,
+	}, startedAt, alive)
+	// ⛔ NOT `defer`: every exit below is os.Exit, which runs no deferred call,
+	// and an entry left behind paces every later wait of this user as though
+	// this one were still polling — until its deadline, which is this wait's
+	// whole timeout. The registry's own staleness rules are the net, not the
+	// plan.
+	for _, note := range reg.Notes {
+		fmt.Fprintln(os.Stderr, note)
+	}
+	chosen, lines := machineInterval(intervalSet, *interval, len(refs), reg.Others, startedAt)
+	for _, line := range lines {
+		fmt.Fprintln(os.Stderr, line)
 	}
 	// The budget is read before the first call is spent, and again whenever a
 	// query is refused, because GET /rate_limit is free and a quota that is
@@ -1162,6 +1193,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, line)
 	}
 	if refuse {
+		reg.Leave()
 		os.Exit(quotaStatus)
 	}
 	w := waiter{
@@ -1176,7 +1208,9 @@ func main() {
 	}
 	// ⛔ run, not wait: the boolean cannot tell a red check from a quota, and
 	// collapsing them is the defect this change removes.
-	if code := w.run(refs).status(); code != 0 {
+	code := w.run(refs).status()
+	reg.Leave()
+	if code != 0 {
 		os.Exit(code)
 	}
 }
