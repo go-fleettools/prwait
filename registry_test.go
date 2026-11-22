@@ -48,9 +48,16 @@ func self(targets ...string) waitEntry {
 // four times what one wait of four targets costs. The quota is per user.
 //
 // `mutsweep -files registry.go,interval.go,alive_unix.go` reports 20 mutations,
-// 20 caught, 0 survived (2026-11-22) — and it reaches only `if` CONDITIONS, so
-// the two pieces of behaviour that are not conditions were mutated BY HAND.
-// Re-apply both after any change here, and expect the named test to go red:
+// 20 caught, 0 survived (2026-11-22) — and it reaches only SOME `if`
+// conditions, so what it does not reach was mutated BY HAND. Re-apply all three
+// after any change here, and expect the named test to go red:
+//
+// ⛔ MEASURED 2026-11-22, AFTER THE WINDOWS FAILURE BELOW: a sweep over
+// registry.go + alive_unix.go reported "17 mutations, 17 caught, 0 survived"
+// and mutated NOTHING IN prune() — not its deadline test, not its pid test, not
+// its alive() test. A green sweep is a count of what it reached; over this
+// function it reached nothing at all, so its silence must never be read as
+// cover. Same class as go-fleettools/fleettools#391.
 //
 //	defaultInterval(mine + elsewhere) -> defaultInterval(mine)
 //	    TestASecondWaitIsPacedForEveryTargetOfThisUser: "interval 45s, want
@@ -60,6 +67,15 @@ func self(targets ...string) waitEntry {
 //	same(): drop `&& e.Started.Equal(o.Started)`
 //	    TestLeaveRemovesThisWaitAndNobodyElses: "an entry sharing this PID was
 //	    taken for this wait" (verified 2026-11-22). PIDs are reused.
+//	prune(): `if w.PID <= 0` -> `if false && w.PID <= 0`
+//	    TestWhichEntriesAreCountedAndWhichAreDropped: "pid zero, liveness says
+//	    keep: kept=true, want false" AND the negative-pid row (verified
+//	    2026-11-22, both red). ⛔ This rule lives here and NOT in alive(),
+//	    because windows-latest went red on 556b67c proving the difference:
+//	    "pid 0 and -1 are not processes to signal" (registry_test.go:167) held
+//	    on unix and could not hold on a platform whose honest answer to every
+//	    pid is "cannot tell". A non-positive pid is a malformed ENTRY, not a
+//	    dead process.
 func TestASecondWaitIsPacedForEveryTargetOfThisUser(t *testing.T) {
 	path := seed(t, other("go-x/y#78", "go-x/y#79", "go-x/y#80"))
 	reg := enter(path, self("go-x/y#82"), regNow, always)
@@ -116,6 +132,14 @@ func TestWhichEntriesAreCountedAndWhichAreDropped(t *testing.T) {
 		{"deadline passed", waitEntry{PID: 4711, Started: regNow.Add(-time.Hour), Deadline: regNow.Add(-time.Second), Targets: []string{"a"}}, always, false},
 		{"deadline exactly now", waitEntry{PID: 4711, Started: regNow.Add(-time.Hour), Deadline: regNow, Targets: []string{"a"}}, always, false},
 		{"process gone", other("a"), never, false},
+		// ⛔ pid 0 and -1 with `always`: the entry is dropped by the STRUCTURAL
+		// rule, and `always` is what proves it — liveness is answering "keep
+		// this" for both. Asserted through prune rather than through alive(),
+		// because the !unix fallback must answer "cannot tell" for every pid;
+		// phrasing this as liveness is what reddened windows-latest on 556b67c
+		// ("pid 0 and -1 are not processes to signal", registry_test.go:167).
+		{"pid zero, liveness says keep", waitEntry{PID: 0, Started: regNow, Deadline: regNow.Add(time.Hour), Targets: []string{"a"}}, always, false},
+		{"negative pid, liveness says keep", waitEntry{PID: -1, Started: regNow, Deadline: regNow.Add(time.Hour), Targets: []string{"a"}}, always, false},
 	} {
 		got := prune([]waitEntry{c.entry}, regNow, c.alive)
 		if kept := len(got) == 1; kept != c.kept {
@@ -163,8 +187,16 @@ func TestAliveAnswersForARealProcessAndAReapedOne(t *testing.T) {
 	case got:
 		t.Fatalf("pid %d was started, waited for and reaped, and still reads as alive", pid)
 	}
-	if alive(0) || alive(-1) {
-		t.Fatal("pid 0 and -1 are not processes to signal")
+	// ⛔ UNIX ONLY, AND NOT BECAUSE WINDOWS IS EXCUSED. Dropping a non-positive
+	// pid is a structural rule, held for every platform in prune() and asserted
+	// in TestWhichEntriesAreCountedAndWhichAreDropped. What is asserted HERE is
+	// narrower: that the unix implementation never hands 0 or -1 to
+	// syscall.Kill, which address the process GROUP and every process this user
+	// may signal. A platform that cannot tell liveness must answer true for
+	// these as for any other pid, so asking it otherwise tests nothing it is
+	// allowed to know.
+	if canTellProcessLiveness && (alive(0) || alive(-1)) {
+		t.Fatal("pid 0 and -1 must never reach syscall.Kill, which would address a process group")
 	}
 }
 

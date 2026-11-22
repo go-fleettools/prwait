@@ -26,6 +26,12 @@ import (
 // canTellProcessLiveness lets a test assert the platform's actual contract
 // instead of listing operating systems: on a platform that cannot tell, "dead"
 // is not a wrong answer to be fixed, it is an answer that must not be given.
+//
+// ⛔ THE pid <= 0 REFUSAL BELOW IS NOT WHAT DROPS SUCH AN ENTRY. It is here so
+// that syscall.Kill is never handed 0 or -1, which address the process GROUP
+// and every process this user may signal. Dropping the entry is prune()'s job,
+// because "no platform has a process 0" is structural and holds where liveness
+// cannot be told at all — see the note on prune in registry.go.
 const canTellProcessLiveness = true
 
 func alive(pid int) bool {

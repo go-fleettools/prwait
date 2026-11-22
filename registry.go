@@ -173,6 +173,23 @@ func prune(ws []waitEntry, now time.Time, alive func(int) bool) []waitEntry {
 		if !w.Deadline.After(now) {
 			continue
 		}
+		// ⛔ A NON-POSITIVE PID IS STRUCTURAL, NOT A LIVENESS MEASUREMENT. No
+		// platform has a process 0 or -1 to poll, and os.Getpid() never returns
+		// one, so such an entry is malformed or hand-written rather than a wait
+		// somebody is running — dropping it is not the asymmetric "it is gone"
+		// judgement that alive() is forbidden to guess at. Keeping it here and
+		// not in alive() is what windows-latest caught: the !unix fallback
+		// answers "cannot tell" for EVERY pid, as it must, so a rule phrased as
+		// liveness held on unix and nowhere else.
+		//
+		// ⛔ It also means syscall.Kill is never handed 0 or -1, which on unix
+		// address the process GROUP and every process the user may signal. With
+		// signal 0 nothing is delivered either way, so this is not the only
+		// thing standing between us and that call — alive_unix.go refuses them
+		// too — but a guard against signalling a group belongs on both sides.
+		if w.PID <= 0 {
+			continue
+		}
 		if !alive(w.PID) {
 			continue
 		}
