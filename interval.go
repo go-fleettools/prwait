@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -88,4 +89,61 @@ func chosenInterval(set bool, asked time.Duration, targets int) (time.Duration, 
 		return asked, ""
 	}
 	return defaultInterval(targets)
+}
+
+// machineInterval decides the interval from this wait's targets AND the ones
+// other live waits of the same user are already polling.
+//
+// ⛔ THE UNIT OF THE BUDGET IS THE USER, NOT THE PROCESS. #25 scaled the
+// interval by the targets of one wait, which is right and not enough: the
+// incident in #20 was four processes, each pacing itself correctly for the one
+// target it knew about. Counting the other waits' targets here makes four
+// single-target waits cost what one four-target wait costs, which is what the
+// cost model in this file always claimed to hold.
+//
+// The advice is printed even when -interval was given, because the number this
+// caller chose was chosen without knowing about the other wait; only the
+// SCALING is withheld, for the reason spelled out above chosenInterval.
+func machineInterval(set bool, asked time.Duration, mine int, others []waitEntry, now time.Time) (time.Duration, []string) {
+	if len(others) == 0 {
+		d, line := chosenInterval(set, asked, mine)
+		if line == "" {
+			return d, nil
+		}
+		return d, []string{line}
+	}
+	elsewhere := 0
+	for _, o := range others {
+		elsewhere += len(o.Targets)
+	}
+	// Bounded: the number of other waits is read from a file another process
+	// writes, and a line that names twenty-five of them is a line nobody reads.
+	shown, more := others, 0
+	if len(shown) > maxWaitsNamed {
+		more = len(shown) - maxWaitsNamed
+		shown = shown[:maxWaitsNamed]
+	}
+	named := make([]string, 0, len(shown)+1)
+	for _, o := range shown {
+		named = append(named, "("+o.describe(now)+")")
+	}
+	if more > 0 {
+		named = append(named, fmt.Sprintf("(and %d more)", more))
+	}
+	lines := []string{fmt.Sprintf("prwait: %d other wait(s) of this user are already polling %d target(s) %s — the REST budget is per USER, shared with every session here and with Renovate, so one wait can take every target: `prwait -repo O/R 78 79 80 82` costs what this wait alone costs and reports them together.",
+		len(others), elsewhere, strings.Join(named, " "))}
+	if set {
+		// Not scaled, and said so: silence here would read as "the interval you
+		// gave accounts for them".
+		return asked, append(lines, fmt.Sprintf("prwait: -interval %s was given, so it is honoured as typed and NOT scaled for those %d target(s).", asked, elsewhere))
+	}
+	d, _ := defaultInterval(mine + elsewhere)
+	lines = append(lines, fmt.Sprintf("prwait: pacing this wait for %d target(s) in all (%d here, %d elsewhere), so the interval is %s rather than %s. -interval overrides this.",
+		mine+elsewhere, mine, elsewhere, d, baseInterval))
+	if d == maxInterval {
+		lines = append(lines, fmt.Sprintf("⚠ %d targets would be %s between polls, which reads as a hang, so the interval is capped at %s: THIS wait alone then spends about %.0f REST calls an hour, and the waits above spend theirs too.",
+			mine+elsewhere, time.Duration(mine+elsewhere)*baseInterval, maxInterval,
+			float64(mine)*float64(time.Hour)/float64(maxInterval)))
+	}
+	return d, lines
 }

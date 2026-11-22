@@ -522,6 +522,11 @@ func TestMain(m *testing.M) {
 		fmt.Println(`{"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":` +
 			`[{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}`)
 		os.Exit(0)
+	case "exitnow":
+		// A process that exists long enough to be started and reaped, so that
+		// `alive` can be asked about a PID that is certainly gone rather than
+		// about a number assumed to be free. See registry_test.go.
+		os.Exit(0)
 	case "fakegh":
 		fakeGhMain()
 	case "badruns":
