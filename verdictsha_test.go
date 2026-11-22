@@ -43,7 +43,7 @@ func TestTheVerdictNamesTheCommitItJudged(t *testing.T) {
 			w := waiter{
 				fetch:     func(pr) (pr, error) { return c.p, nil },
 				interval:  time.Millisecond,
-				timeout:   time.Minute,
+				timeout:   time.Second, // real clock, no-op sleep: a wait that never settles must end soon
 				minChecks: 1,
 				out:       &out,
 				sleep:     func(time.Duration) {},

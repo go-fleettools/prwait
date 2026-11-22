@@ -307,9 +307,17 @@ func TestAFetchErrorIsReportedAndFails(t *testing.T) {
 
 func testWaiter(f fetcher) waiter {
 	return waiter{
-		fetch:     f,
-		interval:  0,
-		timeout:   time.Hour,
+		fetch:    f,
+		interval: 0,
+		// ⛔ A TIMEOUT ONLY EVER BOUNDS THE WRONG CASE. This waiter polls with
+		// no interval and no sleep, so every test that passes finishes on its
+		// first read and never looks at the clock: the only run that reaches
+		// this value is one where the verdict never arrives. An hour here made
+		// such a run spin for an hour of real time, which is how a broken
+		// entry.done() showed up as a suite that hangs rather than a suite
+		// that fails — a hang names no line, and the mutation sweep could only
+		// report HUNG for it. Seconds say the same thing in the same words.
+		timeout:   5 * time.Second,
 		minChecks: 1,
 		out:       os.Stdout,
 		sleep:     func(time.Duration) {},
@@ -514,6 +522,8 @@ func TestMain(m *testing.M) {
 		fmt.Println(`{"mergeable":"MERGEABLE","state":"OPEN","statusCheckRollup":` +
 			`[{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}`)
 		os.Exit(0)
+	case "fakegh":
+		fakeGhMain()
 	case "badruns":
 		if strings.Contains(strings.Join(os.Args[1:], " "), "actions/runs") {
 			fmt.Println("}{ not json")

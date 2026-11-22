@@ -561,7 +561,9 @@ func TestAQuotaWhoseResetFitsIsHeldForAndTheWaitFinishes(t *testing.T) {
 		GraphQL: resource{Limit: 5000, Remaining: 4900, Reset: now.Add(2 * time.Minute)},
 	})
 	w.now = func() time.Time { return now }
-	w.sleep = func(d time.Duration) { now = now.Add(d) }
+	// Every sleep moves the clock at least a second: with interval 0 a sleep of
+	// 0 leaves it frozen, and a wait that never settles then never times out.
+	w.sleep = func(d time.Duration) { now = now.Add(d + time.Second) }
 	w.interval = 0
 	w.timeout = 30 * time.Minute
 	out := &strings.Builder{}
@@ -661,7 +663,8 @@ func TestASecondaryLimitIsReportedAsOneAndHeldFor(t *testing.T) {
 		GraphQL: resource{Limit: 5000, Remaining: 4900, Reset: now.Add(20 * time.Minute)},
 	})
 	w.now = func() time.Time { return now }
-	w.sleep = func(d time.Duration) { now = now.Add(d) }
+	// As above: a clock that always moves, so a broken wait times out.
+	w.sleep = func(d time.Duration) { now = now.Add(d + time.Second) }
 	w.interval = 0
 	w.timeout = 30 * time.Minute
 	out := &strings.Builder{}

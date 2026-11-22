@@ -97,7 +97,9 @@ one poll could not read is NOT a move.
 
 flags:
   -repo OWNER/REPO   repository for bare targets
-  -interval 45s      how often to ask
+  -interval 45s×N    how often to ask: 45s for one target, 45s per target up to
+                     a 5m cap, because a poll reads EVERY target and the REST
+                     budget is per user. Given explicitly, it is used as typed.
   -timeout 30m       give up after this, per run
   -min-checks 1      how many checks must EXIST before a pass is possible
   -gh gh             the gh binary to ask
@@ -1135,6 +1137,21 @@ func main() {
 		}
 		refs = append(refs, t)
 	}
+	// ⛔ The interval is decided from the TARGET COUNT, after the targets have
+	// been parsed and before any call is spent. A poll reads every target, so
+	// the flag that reads as "how often to ask" is really "how much of a shared
+	// budget to spend", and one value cannot mean the same thing for one target
+	// and for four. An explicitly given -interval is honoured as typed.
+	intervalSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "interval" {
+			intervalSet = true
+		}
+	})
+	chosen, why := chosenInterval(intervalSet, *interval, len(refs))
+	if why != "" {
+		fmt.Fprintln(os.Stderr, why)
+	}
 	// The budget is read before the first call is spent, and again whenever a
 	// query is refused, because GET /rate_limit is free and a quota that is
 	// merely guessed at is how a rate limit came to be reported as a red
@@ -1150,7 +1167,7 @@ func main() {
 	w := waiter{
 		fetch:     ghFetcher(*ghBin),
 		budget:    read,
-		interval:  *interval,
+		interval:  chosen,
 		timeout:   *timeout,
 		minChecks: *minChecks,
 		out:       os.Stdout,

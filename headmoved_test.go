@@ -50,7 +50,7 @@ func waiterOver(fetch func(pr) (pr, error), out *bytes.Buffer) waiter {
 	return waiter{
 		fetch:     fetch,
 		interval:  time.Millisecond,
-		timeout:   time.Minute,
+		timeout:   time.Second, // real clock, no-op sleep: a wait that never settles must end soon
 		minChecks: 1,
 		out:       out,
 		sleep:     func(time.Duration) {},
