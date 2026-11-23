@@ -21,5 +21,5 @@ jobs:
           go-version-file: go.mod
       - name: probe
         env:
-          PROBE_ROUNDS: "300"
-        run: go test -race -count=1 -run 'TestWinRaceProbe' -v ./...
+          UNUSED: "1"
+        run: go test -race -count=20 -run 'TestConcurrentEntriesAreNotLostOverManyRounds|TestAPermission' -v ./...

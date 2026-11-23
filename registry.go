@@ -349,6 +349,10 @@ func writeWaits(path string, ws []waitEntry) error {
 	return nil
 }
 
+// mkdirLock creates the lock directory; a variable so a test can inject the
+// error Windows gives for a directory that is delete-pending.
+var mkdirLock = os.Mkdir
+
 // withLock serialises the read-modify-write above between processes.
 //
 // ⛔ A DIRECTORY, because os.Mkdir is the one creation that is atomic and
@@ -359,11 +363,23 @@ func writeWaits(path string, ws []waitEntry) error {
 func withLock(path string, f func() error) (notes []string) {
 	lock := path + ".lock"
 	for start := time.Now(); ; {
-		err := os.Mkdir(lock, 0o700)
+		err := mkdirLock(lock, 0o700)
 		if err == nil {
 			break
 		}
-		if !os.IsExist(err) {
+		// ⛔ "ACCESS DENIED" IS CONTENTION ON WINDOWS. RemoveDirectory only MARKS
+		// a directory for deletion on close ("the directory is not removed until
+		// the last handle to the directory is closed", Win32 RemoveDirectory
+		// remarks), and until then a Mkdir of the same name fails with
+		// ERROR_ACCESS_DENIED — not "already exists". Reading that as "cannot
+		// lock at all" skipped the body, so a wait's entry was never written:
+		// measured on windows-latest, 51 of 1800 rounds of 8 concurrent enters
+		// lost an entry, every one with `mkdir …waits.json.lock: Access is
+		// denied.` A permission error is therefore retried like EEXIST until
+		// lockWait, and a lock that really cannot be created (read-only parent)
+		// still ends in a note, naming the error.
+		contended := os.IsExist(err) || os.IsPermission(err)
+		if !contended {
 			return append(notes, fmt.Sprintf("prwait: cannot lock the wait registry (%v), so this wait is paced on its own targets only.", err))
 		}
 		if st, serr := os.Stat(lock); serr == nil && time.Since(st.ModTime()) > lockStale {
@@ -375,7 +391,7 @@ func withLock(path string, f func() error) (notes []string) {
 			continue
 		}
 		if time.Since(start) > lockWait {
-			return append(notes, fmt.Sprintf("prwait: the wait registry stayed locked for %s, so this wait is paced on its own targets only.", lockWait))
+			return append(notes, fmt.Sprintf("prwait: the wait registry stayed locked for %s (%v), so this wait is paced on its own targets only.", lockWait, err))
 		}
 		time.Sleep(lockPoll)
 	}
