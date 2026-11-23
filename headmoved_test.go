@@ -53,7 +53,7 @@ func waiterOver(t *testing.T, fetch func(pr) (pr, error), out *bytes.Buffer) wai
 		timeout:   time.Second, // real clock, no-op sleep: a wait that never settles must end soon
 		minChecks: 1,
 		out:       out,
-		sleep:     func(time.Duration) {},
+		sleep:     boundedRealSleep(t, 20*time.Second),
 		now:       boundedRealNow(t, 20*time.Second),
 	}
 }

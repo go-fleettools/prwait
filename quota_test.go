@@ -506,7 +506,7 @@ func TestAQuotaIsNotAVerdictAndNotAFail(t *testing.T) {
 		GraphQL: resource{Limit: 5000, Remaining: 4900, Reset: now.Add(50 * time.Minute)},
 	})
 	w.now = boundedNow(t, &now)
-	w.sleep = func(d time.Duration) { now = now.Add(d) }
+	w.sleep = boundedSleep(t, &now, 0)
 	w.interval = 45 * time.Second
 	w.timeout = 30 * time.Minute
 	out := &strings.Builder{}
@@ -563,7 +563,7 @@ func TestAQuotaWhoseResetFitsIsHeldForAndTheWaitFinishes(t *testing.T) {
 	w.now = boundedNow(t, &now)
 	// Every sleep moves the clock at least a second: with interval 0 a sleep of
 	// 0 leaves it frozen, and a wait that never settles then never times out.
-	w.sleep = func(d time.Duration) { now = now.Add(d + time.Second) }
+	w.sleep = boundedSleep(t, &now, time.Second)
 	w.interval = 0
 	w.timeout = 30 * time.Minute
 	out := &strings.Builder{}
@@ -599,7 +599,7 @@ func TestAMeasuredRedOutranksAQuota(t *testing.T) {
 		GraphQL: resource{Limit: 5000, Remaining: 0, Reset: now.Add(50 * time.Minute)},
 	})
 	w.now = boundedNow(t, &now)
-	w.sleep = func(d time.Duration) { now = now.Add(d) }
+	w.sleep = boundedSleep(t, &now, 0)
 	w.timeout = 30 * time.Minute
 	out := &strings.Builder{}
 	w.out = out
@@ -630,7 +630,7 @@ func TestTheTargetsAQuotaLeftUnjudgedAreNamed(t *testing.T) {
 		GraphQL: resource{Limit: 5000, Remaining: 0, Reset: now.Add(50 * time.Minute)},
 	})
 	w.now = boundedNow(t, &now)
-	w.sleep = func(d time.Duration) { now = now.Add(d) }
+	w.sleep = boundedSleep(t, &now, 0)
 	w.timeout = 30 * time.Minute
 	out := &strings.Builder{}
 	w.out = out
@@ -664,7 +664,7 @@ func TestASecondaryLimitIsReportedAsOneAndHeldFor(t *testing.T) {
 	})
 	w.now = boundedNow(t, &now)
 	// As above: a clock that always moves, so a broken wait times out.
-	w.sleep = func(d time.Duration) { now = now.Add(d + time.Second) }
+	w.sleep = boundedSleep(t, &now, time.Second)
 	w.interval = 0
 	w.timeout = 30 * time.Minute
 	out := &strings.Builder{}

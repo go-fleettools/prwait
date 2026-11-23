@@ -189,8 +189,11 @@ func TestNoCacheDirectoryIsSaidAndDoesNotChangeTheVerdict(t *testing.T) {
 	if r.code != 0 {
 		t.Fatalf("exit %d, want 0 (the registry is advisory); stdout %q stderr %q", r.code, r.stdout, r.stderr)
 	}
-	if !strings.Contains(r.stderr, "no user cache directory") {
-		t.Errorf("the missing cache directory was not mentioned: %q", r.stderr)
+	// registry.go says it too, in its own words ("no user cache directory,"), so
+	// the assertion names main's, which carries the cause in parentheses: with
+	// the registry's note alone the reader is not told why.
+	if !strings.Contains(r.stderr, "no user cache directory (") {
+		t.Errorf("main did not say why the waits cannot be counted: %q", r.stderr)
 	}
 }
 

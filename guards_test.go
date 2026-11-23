@@ -62,7 +62,7 @@ func TestACompletedCheckRunIsFinishedWhateverItsStateSays(t *testing.T) {
 		return pr{Mergeable: "MERGEABLE", Rollup: []entry{{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"}}}, nil
 	})
 	w.now = boundedNow(t, &clock)
-	w.sleep = func(d time.Duration) { clock = clock.Add(d) }
+	w.sleep = boundedSleep(t, &clock, 0)
 	w.interval = time.Minute
 	w.timeout = 3 * time.Minute
 	out := &strings.Builder{}

@@ -257,7 +257,7 @@ func TestATimeoutIsAFailure(t *testing.T) {
 		return pr{Mergeable: "MERGEABLE", Rollup: []entry{{Name: "test", Status: "QUEUED"}}}, nil
 	})
 	w.now = boundedNow(t, &now)
-	w.sleep = func(d time.Duration) { now = now.Add(d) }
+	w.sleep = boundedSleep(t, &now, 0)
 	w.interval = time.Minute
 	w.timeout = 3 * time.Minute
 	out := &strings.Builder{}
@@ -320,7 +320,7 @@ func testWaiter(t *testing.T, f fetcher) waiter {
 		timeout:   5 * time.Second,
 		minChecks: 1,
 		out:       os.Stdout,
-		sleep:     func(time.Duration) {},
+		sleep:     boundedRealSleep(t, 30*time.Second),
 		now:       boundedRealNow(t, 30*time.Second),
 	}
 }
