@@ -153,7 +153,7 @@ func TestTheWaitItselfPrintsTheAdvice(t *testing.T) {
 			Created:    time.Date(2026, 10, 12, 15, 52, 0, 0, time.UTC).Format(time.RFC3339),
 		}},
 	}
-	w := testWaiter(func(p pr) (pr, error) {
+	w := testWaiter(t, func(p pr) (pr, error) {
 		red.Repo, red.Number = p.Repo, p.Number
 		return red, nil
 	})
@@ -198,7 +198,7 @@ func TestAFreshRedPrintsNoAdvice(t *testing.T) {
 			Event: "pull_request", Number: 9, Created: ago(2 * time.Hour),
 		}},
 	}
-	w := testWaiter(func(p pr) (pr, error) {
+	w := testWaiter(t, func(p pr) (pr, error) {
 		red.Repo, red.Number = p.Repo, p.Number
 		return red, nil
 	})

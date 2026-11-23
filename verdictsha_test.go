@@ -46,8 +46,8 @@ func TestTheVerdictNamesTheCommitItJudged(t *testing.T) {
 				timeout:   time.Second, // real clock, no-op sleep: a wait that never settles must end soon
 				minChecks: 1,
 				out:       &out,
-				sleep:     func(time.Duration) {},
-				now:       time.Now,
+				sleep:     boundedRealSleep(t, 20*time.Second),
+				now:       boundedRealNow(t, 20*time.Second),
 			}
 			w.wait([]pr{{Repo: "o/r", Number: 230}})
 			got := out.String()
@@ -75,8 +75,8 @@ func TestATimeoutNamesTheCommit(t *testing.T) {
 		timeout:   -1, // already expired
 		minChecks: 1,
 		out:       &out,
-		sleep:     func(time.Duration) {},
-		now:       time.Now,
+		sleep:     boundedRealSleep(t, 20*time.Second),
+		now:       boundedRealNow(t, 20*time.Second),
 	}
 	w.wait([]pr{{Repo: "o/r", Number: 7}})
 	got := out.String()

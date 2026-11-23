@@ -229,7 +229,7 @@ func TestATargetSaysWhichKindItIs(t *testing.T) {
 // and stop the moment it is.
 func TestTheWaiterPollsUntilItSettles(t *testing.T) {
 	calls := 0
-	w := testWaiter(func(pr) (pr, error) {
+	w := testWaiter(t, func(pr) (pr, error) {
 		calls++
 		if calls < 3 {
 			return pr{Mergeable: "MERGEABLE", Rollup: []entry{{Name: "test", Status: "IN_PROGRESS"}}}, nil
@@ -253,11 +253,11 @@ func TestTheWaiterPollsUntilItSettles(t *testing.T) {
 // and not as a hang: the timeout is an answer about the pull request.
 func TestATimeoutIsAFailure(t *testing.T) {
 	now := time.Unix(0, 0)
-	w := testWaiter(func(pr) (pr, error) {
+	w := testWaiter(t, func(pr) (pr, error) {
 		return pr{Mergeable: "MERGEABLE", Rollup: []entry{{Name: "test", Status: "QUEUED"}}}, nil
 	})
-	w.now = func() time.Time { return now }
-	w.sleep = func(d time.Duration) { now = now.Add(d) }
+	w.now = boundedNow(t, &now)
+	w.sleep = boundedSleep(t, &now, 0)
 	w.interval = time.Minute
 	w.timeout = 3 * time.Minute
 	out := &strings.Builder{}
@@ -273,7 +273,7 @@ func TestATimeoutIsAFailure(t *testing.T) {
 // One red pull request among several must sink the whole run, and the
 // others must still be reported rather than abandoned.
 func TestOneFailureSinksTheRunAndTheRestAreStillReported(t *testing.T) {
-	w := testWaiter(func(target pr) (pr, error) {
+	w := testWaiter(t, func(target pr) (pr, error) {
 		c := "SUCCESS"
 		if target.Number == 2 {
 			c = "FAILURE"
@@ -294,7 +294,7 @@ func TestOneFailureSinksTheRunAndTheRestAreStillReported(t *testing.T) {
 
 // AN ERROR FROM gh IS NOT A PASS EITHER — not a wait, and not silence.
 func TestAFetchErrorIsReportedAndFails(t *testing.T) {
-	w := testWaiter(func(pr) (pr, error) { return pr{}, errors.New("gh: not authenticated") })
+	w := testWaiter(t, func(pr) (pr, error) { return pr{}, errors.New("gh: not authenticated") })
 	out := &strings.Builder{}
 	w.out = out
 	if w.wait([]pr{{Repo: "a/b", Number: 1}}) {
@@ -305,7 +305,7 @@ func TestAFetchErrorIsReportedAndFails(t *testing.T) {
 	}
 }
 
-func testWaiter(f fetcher) waiter {
+func testWaiter(t *testing.T, f fetcher) waiter {
 	return waiter{
 		fetch:    f,
 		interval: 0,
@@ -320,8 +320,8 @@ func testWaiter(f fetcher) waiter {
 		timeout:   5 * time.Second,
 		minChecks: 1,
 		out:       os.Stdout,
-		sleep:     func(time.Duration) {},
-		now:       time.Now,
+		sleep:     boundedRealSleep(t, 30*time.Second),
+		now:       boundedRealNow(t, 30*time.Second),
 	}
 }
 
@@ -529,6 +529,8 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	case "fakegh":
 		fakeGhMain()
+	case "main":
+		mainHelper()
 	case "badruns":
 		if strings.Contains(strings.Join(os.Args[1:], " "), "actions/runs") {
 			fmt.Println("}{ not json")
@@ -642,7 +644,7 @@ func TestAThresholdMeantForAnotherRepositoryIsSaidOutLoud(t *testing.T) {
 // says anything about the pull request, and both used to kill the run.
 func TestATransientQueryFailureIsRetried(t *testing.T) {
 	calls := 0
-	w := testWaiter(func(pr) (pr, error) {
+	w := testWaiter(t, func(pr) (pr, error) {
 		calls++
 		if calls <= 2 {
 			return pr{}, errors.New("fork/exec gh: resource temporarily unavailable")
@@ -668,7 +670,7 @@ func TestATransientQueryFailureIsRetried(t *testing.T) {
 // to refuse.
 func TestPersistentQueryFailureStillFails(t *testing.T) {
 	calls := 0
-	w := testWaiter(func(pr) (pr, error) {
+	w := testWaiter(t, func(pr) (pr, error) {
 		calls++
 		return pr{}, errors.New("gh: not authenticated")
 	})
@@ -695,7 +697,7 @@ func TestPersistentQueryFailureStillFails(t *testing.T) {
 // weather twice over and must not add up to a wall.
 func TestTheRetryCounterResetsOnSuccess(t *testing.T) {
 	calls := 0
-	w := testWaiter(func(pr) (pr, error) {
+	w := testWaiter(t, func(pr) (pr, error) {
 		calls++
 		switch calls {
 		case 1, 3, 5:
