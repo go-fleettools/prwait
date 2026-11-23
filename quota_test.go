@@ -389,7 +389,7 @@ func TestRepeatedQuotasStillEndTheWaitWithinItsTimeout(t *testing.T) {
 	start := time.Unix(1_700_000_000, 0)
 	now := start
 	calls := 0
-	w := testWaiter(func(pr) (pr, error) {
+	w := testWaiter(t, func(pr) (pr, error) {
 		calls++
 		return pr{}, errors.New(secondaryMsg)
 	})
@@ -397,7 +397,7 @@ func TestRepeatedQuotasStillEndTheWaitWithinItsTimeout(t *testing.T) {
 		Core:    resource{Limit: 5000, Remaining: 4000, Reset: start.Add(20 * time.Minute)},
 		GraphQL: resource{Limit: 5000, Remaining: 4900, Reset: start.Add(20 * time.Minute)},
 	})
-	w.now = func() time.Time { return now }
+	w.now = boundedNow(t, &now)
 	w.timeout = 3 * time.Minute
 	w.interval = 0
 	w.sleep = func(d time.Duration) {
@@ -495,7 +495,7 @@ func TestPreflightRefusesOnlyWhatCannotPossiblyWork(t *testing.T) {
 func TestAQuotaIsNotAVerdictAndNotAFail(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	calls := 0
-	w := testWaiter(func(pr) (pr, error) {
+	w := testWaiter(t, func(pr) (pr, error) {
 		calls++
 		return pr{}, errors.New(primaryMsg)
 	})
@@ -505,7 +505,7 @@ func TestAQuotaIsNotAVerdictAndNotAFail(t *testing.T) {
 		Core:    resource{Limit: 5000, Remaining: 0, Reset: now.Add(50 * time.Minute)},
 		GraphQL: resource{Limit: 5000, Remaining: 4900, Reset: now.Add(50 * time.Minute)},
 	})
-	w.now = func() time.Time { return now }
+	w.now = boundedNow(t, &now)
 	w.sleep = func(d time.Duration) { now = now.Add(d) }
 	w.interval = 45 * time.Second
 	w.timeout = 30 * time.Minute
@@ -549,7 +549,7 @@ func TestAQuotaIsNotAVerdictAndNotAFail(t *testing.T) {
 func TestAQuotaWhoseResetFitsIsHeldForAndTheWaitFinishes(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	calls := 0
-	w := testWaiter(func(pr) (pr, error) {
+	w := testWaiter(t, func(pr) (pr, error) {
 		calls++
 		if calls == 1 {
 			return pr{}, errors.New(primaryMsg)
@@ -560,7 +560,7 @@ func TestAQuotaWhoseResetFitsIsHeldForAndTheWaitFinishes(t *testing.T) {
 		Core:    resource{Limit: 5000, Remaining: 0, Reset: now.Add(2 * time.Minute)},
 		GraphQL: resource{Limit: 5000, Remaining: 4900, Reset: now.Add(2 * time.Minute)},
 	})
-	w.now = func() time.Time { return now }
+	w.now = boundedNow(t, &now)
 	// Every sleep moves the clock at least a second: with interval 0 a sleep of
 	// 0 leaves it frozen, and a wait that never settles then never times out.
 	w.sleep = func(d time.Duration) { now = now.Add(d + time.Second) }
@@ -588,7 +588,7 @@ func TestAQuotaWhoseResetFitsIsHeldForAndTheWaitFinishes(t *testing.T) {
 // could exit 3 and be read as "come back later".
 func TestAMeasuredRedOutranksAQuota(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	w := testWaiter(func(p pr) (pr, error) {
+	w := testWaiter(t, func(p pr) (pr, error) {
 		if p.Number == 1 {
 			return pr{Mergeable: "MERGEABLE", Rollup: []entry{{Name: "test", Status: "COMPLETED", Conclusion: "FAILURE"}}}, nil
 		}
@@ -598,7 +598,7 @@ func TestAMeasuredRedOutranksAQuota(t *testing.T) {
 		Core:    resource{Limit: 5000, Remaining: 0, Reset: now.Add(50 * time.Minute)},
 		GraphQL: resource{Limit: 5000, Remaining: 0, Reset: now.Add(50 * time.Minute)},
 	})
-	w.now = func() time.Time { return now }
+	w.now = boundedNow(t, &now)
 	w.sleep = func(d time.Duration) { now = now.Add(d) }
 	w.timeout = 30 * time.Minute
 	out := &strings.Builder{}
@@ -624,12 +624,12 @@ func TestAMeasuredRedOutranksAQuota(t *testing.T) {
 // did not say which surfaces it covered.
 func TestTheTargetsAQuotaLeftUnjudgedAreNamed(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	w := testWaiter(func(pr) (pr, error) { return pr{}, errors.New(primaryMsg) })
+	w := testWaiter(t, func(pr) (pr, error) { return pr{}, errors.New(primaryMsg) })
 	w.budget = fixedBudget(budget{
 		Core:    resource{Limit: 5000, Remaining: 0, Reset: now.Add(50 * time.Minute)},
 		GraphQL: resource{Limit: 5000, Remaining: 0, Reset: now.Add(50 * time.Minute)},
 	})
-	w.now = func() time.Time { return now }
+	w.now = boundedNow(t, &now)
 	w.sleep = func(d time.Duration) { now = now.Add(d) }
 	w.timeout = 30 * time.Minute
 	out := &strings.Builder{}
@@ -651,7 +651,7 @@ func TestTheTargetsAQuotaLeftUnjudgedAreNamed(t *testing.T) {
 func TestASecondaryLimitIsReportedAsOneAndHeldFor(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	calls := 0
-	w := testWaiter(func(pr) (pr, error) {
+	w := testWaiter(t, func(pr) (pr, error) {
 		calls++
 		if calls <= 2 {
 			return pr{}, errors.New(secondaryMsg)
@@ -662,7 +662,7 @@ func TestASecondaryLimitIsReportedAsOneAndHeldFor(t *testing.T) {
 		Core:    resource{Limit: 5000, Remaining: 4000, Reset: now.Add(20 * time.Minute)},
 		GraphQL: resource{Limit: 5000, Remaining: 4900, Reset: now.Add(20 * time.Minute)},
 	})
-	w.now = func() time.Time { return now }
+	w.now = boundedNow(t, &now)
 	// As above: a clock that always moves, so a broken wait times out.
 	w.sleep = func(d time.Duration) { now = now.Add(d + time.Second) }
 	w.interval = 0

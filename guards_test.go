@@ -58,10 +58,10 @@ func TestACompletedCheckRunIsFinishedWhateverItsStateSays(t *testing.T) {
 	}
 
 	clock := time.Unix(0, 0)
-	w := testWaiter(func(pr) (pr, error) {
+	w := testWaiter(t, func(pr) (pr, error) {
 		return pr{Mergeable: "MERGEABLE", Rollup: []entry{{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"}}}, nil
 	})
-	w.now = func() time.Time { return clock }
+	w.now = boundedNow(t, &clock)
 	w.sleep = func(d time.Duration) { clock = clock.Add(d) }
 	w.interval = time.Minute
 	w.timeout = 3 * time.Minute
@@ -174,19 +174,47 @@ func fakeGhMain() {
 	fmt.Fprintln(f, args)
 	f.Close()
 	mode := os.Getenv("FAKE_GH_MODE")
+	if strings.Contains(args, "rate_limit") {
+		switch mode {
+		case "silentfail":
+			os.Exit(1)
+		case "spent":
+			fmt.Println(`{"resources":{` +
+				`"core":{"limit":5000,"remaining":0,"reset":1795289130,"used":5000},` +
+				`"graphql":{"limit":5000,"remaining":0,"reset":1795289200,"used":5000}}}`)
+		default:
+			fmt.Println(`{"resources":{` +
+				`"core":{"limit":5000,"remaining":3748,"reset":1795289130,"used":1252},` +
+				`"graphql":{"limit":5000,"remaining":4900,"reset":1795289200,"used":100}}}`)
+		}
+		os.Exit(0)
+	}
 	if strings.Contains(args, "actions/runs") {
-		if mode == "runsfail" {
+		switch mode {
+		case "runsfail":
 			fmt.Fprintln(os.Stderr, "boom: runs endpoint down")
+			os.Exit(1)
+		case "runssilent":
 			os.Exit(1)
 		}
 		fmt.Println(`{"workflow_runs":[]}`)
 		os.Exit(0)
 	}
-	if mode == "badpr" {
+	switch mode {
+	case "badpr":
 		fmt.Println("}{ not json")
 		os.Exit(0)
+	case "silentfail":
+		os.Exit(1)
 	}
-	fmt.Printf(`{"mergeable":"MERGEABLE","state":"OPEN","headRefOid":%q,"statusCheckRollup":[]}`+"\n", helperSHA)
+	conclusion := ""
+	switch mode {
+	case "green":
+		conclusion = `{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}`
+	case "red":
+		conclusion = `{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"FAILURE"}`
+	}
+	fmt.Printf(`{"mergeable":"MERGEABLE","state":"OPEN","headRefOid":%q,"statusCheckRollup":[%s]}`+"\n", helperSHA, conclusion)
 	os.Exit(0)
 }
 

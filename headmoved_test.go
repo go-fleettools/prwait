@@ -46,7 +46,7 @@ func movingHead(p pr) func(pr) (pr, error) {
 	}
 }
 
-func waiterOver(fetch func(pr) (pr, error), out *bytes.Buffer) waiter {
+func waiterOver(t *testing.T, fetch func(pr) (pr, error), out *bytes.Buffer) waiter {
 	return waiter{
 		fetch:     fetch,
 		interval:  time.Millisecond,
@@ -54,14 +54,14 @@ func waiterOver(fetch func(pr) (pr, error), out *bytes.Buffer) waiter {
 		minChecks: 1,
 		out:       out,
 		sleep:     func(time.Duration) {},
-		now:       time.Now,
+		now:       boundedRealNow(t, 20*time.Second),
 	}
 }
 
 func TestAHeadThatMovesMidWaitIsRefusedNotFollowed(t *testing.T) {
 	ref := pr{Repo: "o/r", Number: 752}
 	var out bytes.Buffer
-	ok := waiterOver(movingHead(ref), &out).wait([]pr{ref})
+	ok := waiterOver(t, movingHead(ref), &out).wait([]pr{ref})
 
 	if ok {
 		t.Error("a wait whose subject changed under it reported success")
@@ -88,7 +88,7 @@ func TestAHeadThatMovesMidWaitIsRefusedNotFollowed(t *testing.T) {
 func TestAStillHeadStillReachesItsVerdict(t *testing.T) {
 	ref := pr{Repo: "o/r", Number: 750}
 	var out bytes.Buffer
-	ok := waiterOver(func(pr) (pr, error) {
+	ok := waiterOver(t, func(pr) (pr, error) {
 		q := ref
 		q.HeadRefOid = shaOne
 		q.Mergeable = "MERGEABLE"
@@ -110,7 +110,7 @@ func TestAStillHeadStillReachesItsVerdict(t *testing.T) {
 func TestABranchHeadThatMovesIsRefusedToo(t *testing.T) {
 	ref := pr{Repo: "o/r", Branch: "main"}
 	var out bytes.Buffer
-	ok := waiterOver(movingHead(ref), &out).wait([]pr{ref})
+	ok := waiterOver(t, movingHead(ref), &out).wait([]pr{ref})
 
 	if ok {
 		t.Error("a branch that moved under the wait reported success")
@@ -128,7 +128,7 @@ func TestAnUnreadableHeadIsNotAMove(t *testing.T) {
 	ref := pr{Repo: "o/r", Number: 9}
 	calls := 0
 	var out bytes.Buffer
-	ok := waiterOver(func(pr) (pr, error) {
+	ok := waiterOver(t, func(pr) (pr, error) {
 		calls++
 		q := ref
 		q.Mergeable = "MERGEABLE"

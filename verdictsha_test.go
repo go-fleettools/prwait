@@ -47,7 +47,7 @@ func TestTheVerdictNamesTheCommitItJudged(t *testing.T) {
 				minChecks: 1,
 				out:       &out,
 				sleep:     func(time.Duration) {},
-				now:       time.Now,
+				now:       boundedRealNow(t, 20*time.Second),
 			}
 			w.wait([]pr{{Repo: "o/r", Number: 230}})
 			got := out.String()
@@ -76,7 +76,7 @@ func TestATimeoutNamesTheCommit(t *testing.T) {
 		minChecks: 1,
 		out:       &out,
 		sleep:     func(time.Duration) {},
-		now:       time.Now,
+		now:       boundedRealNow(t, 20*time.Second),
 	}
 	w.wait([]pr{{Repo: "o/r", Number: 7}})
 	got := out.String()
