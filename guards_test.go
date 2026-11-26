@@ -23,13 +23,13 @@ import (
 // A StatusContext carries no name, only a context, and a report that called it
 // "(unnamed)" would send the reader hunting for a lane they cannot identify.
 func TestAStatusContextIsNamedByItsContext(t *testing.T) {
-	if got := (entry{Context: "ci/third-party"}).label(); got != "ci/third-party" {
+	if got := (entry{Context: "ci/third-party"}).Label(); got != "ci/third-party" {
 		t.Errorf("label = %q, want the context", got)
 	}
-	if got := (entry{Name: "test", Context: "ci/other"}).label(); got != "test" {
+	if got := (entry{Name: "test", Context: "ci/other"}).Label(); got != "test" {
 		t.Errorf("label = %q, a name must outrank a context", got)
 	}
-	if got := (entry{}).label(); got != "(unnamed)" {
+	if got := (entry{}).Label(); got != "(unnamed)" {
 		t.Errorf("label = %q, want (unnamed)", got)
 	}
 }
@@ -52,7 +52,7 @@ func TestACompletedCheckRunIsFinishedWhateverItsStateSays(t *testing.T) {
 		{entry{State: "PENDING"}, false},
 	}
 	for _, c := range cases {
-		if got := c.e.done(); got != c.want {
+		if got := c.e.Done(); got != c.want {
 			t.Errorf("%+v: done() = %v, want %v", c.e, got, c.want)
 		}
 	}
