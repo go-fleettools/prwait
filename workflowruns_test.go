@@ -126,7 +126,7 @@ func TestWhichRunConclusionsCount(t *testing.T) {
 // before the sign.
 func TestAnUnnamedRunIsStillNamed(t *testing.T) {
 	es := runEntries([]wfrun{{Status: "completed", Conclusion: "failure"}})
-	if len(es) != 1 || !strings.HasPrefix(es[0].label(), "(unnamed)") {
+	if len(es) != 1 || !strings.HasPrefix(es[0].Label(), "(unnamed)") {
 		t.Fatalf("an unnamed run renders as %+v", es)
 	}
 }

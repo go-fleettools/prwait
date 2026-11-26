@@ -276,6 +276,15 @@ go install github.com/go-fleettools/prwait@latest
 It shells out to [`gh`](https://cli.github.com), which holds the authentication: prwait
 never reads, prints or passes a token, and nothing secret ever reaches a command line.
 
+## The judge as a library
+
+The rules above (latest run per workflow and event, null conclusion pending,
+CANCELLED not a pass, a green run with zero jobs never started) live in
+`github.com/go-fleettools/prwait/judge`, so a program that asks "is this commit
+green" imports them instead of copying them. It never networks and never
+sleeps: `LatestRuns`, `RunEntries`, `Classify`, `RunState` (which counts jobs),
+`Ok`, `Tally`. prwait itself uses it unchanged.
+
 ## Usage
 
 ```

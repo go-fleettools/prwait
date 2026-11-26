@@ -47,10 +47,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-fleettools/prwait/judge"
 )
 
 const usage = `prwait — wait for a pull request's or a branch's checks, and refuse to call an empty list a pass
@@ -120,158 +121,35 @@ exit status:
   3  the API quota stopped the wait: nothing was measured, nothing is claimed
 `
 
-// A rollup entry is one of two shapes and they do NOT share a field.
+// The judge itself lives in package judge (one implementation, shared with
+// every other program that asks "is this commit green"); the names below are
+// this program's spelling of it.
 //
-// A CheckRun has status + conclusion. A StatusContext — the old commit
-// status API, still used by plenty of third-party services — has neither:
-// it has state. A waiter that tests `status != "COMPLETED"` therefore finds
-// every StatusContext pending FOREVER, and waits out its timeout on a pull
-// request that is finished and green.
-type entry struct {
-	Typename   string `json:"__typename"`
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	Conclusion string `json:"conclusion"`
-	Context    string `json:"context"`
-	State      string `json:"state"`
-}
+// A rollup entry is a CheckRun (status + conclusion) or a StatusContext
+// (state): see judge.Entry. A wfrun is one workflow run for the head commit,
+// NOT a check run and absent from a check rollup: see the third mechanism in
+// this file's doc comment.
+type (
+	entry = judge.Entry
+	wfrun = judge.Run
+)
 
-// label is what to call this check in a report.
-func (e entry) label() string {
-	if e.Name != "" {
-		return e.Name
-	}
-	if e.Context != "" {
-		return e.Context
-	}
-	return "(unnamed)"
-}
-
-// done reports whether this check has reached a final answer.
-func (e entry) done() bool {
-	if e.Status != "" {
-		return e.Status == "COMPLETED"
-	}
-	switch e.State {
-	case "", "PENDING", "EXPECTED":
-		return false
-	default:
-		return true
-	}
-}
-
-// result is the final answer, from whichever field carries it.
-func (e entry) result() string {
-	if e.Conclusion != "" {
-		return e.Conclusion
-	}
-	return e.State
-}
-
-// wfrun is one workflow run for the head commit, as the REST actions API
-// reports it. It is NOT a check run and does not appear in a check rollup:
-// see the third mechanism in this file's doc comment.
-type wfrun struct {
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	Conclusion string `json:"conclusion"`
-	URL        string `json:"html_url"`
-	// WorkflowID, Event and Number identify WHICH attempt at a workflow this
-	// is. A commit can carry several runs of the same workflow — a failed one
-	// and the retrigger that replaced it — and judging both would make a
-	// commit that is now green unpassable forever. See [latestRuns].
-	WorkflowID int64  `json:"workflow_id"`
-	Event      string `json:"event"`
-	Number     int    `json:"run_number"`
-	Created    string `json:"created_at"`
-}
-
-// latestRuns keeps only the most recent run of each workflow FOR EACH EVENT,
-// and drops the ones it superseded.
-//
-// ⛔ MEASURED THE DAY THIS WAS WRITTEN, by running it. Two `pull_request`
-// runs on go-tex/go-tex.github.io#239 failed to start; closing and reopening
-// the pull request produced fresh, green `pull_request` runs for the SAME
-// commit. Both the old red and the new green are returned by
-// actions/runs?head_sha, so judging every run refused a commit that was by
-// then green — and a gate that cannot go green again is a gate people route
-// around, which is worse than no gate.
-//
-// ⛔ AND THE KEY INCLUDES THE EVENT, which is the trap under the trap. On
-// that same commit a `workflow_dispatch` of the playground workflow was GREEN
-// while its `pull_request` run was RED. Keyed on the workflow alone, the
-// dispatch — a run I had started myself, by hand, to see whether the branch
-// was sound — would have masked the red one. A run started to investigate a
-// failure must never be able to answer for it.
-func latestRuns(rs []wfrun) []wfrun {
-	type key struct {
-		id    int64
-		event string
-	}
-	best := map[key]wfrun{}
-	for _, r := range rs {
-		k := key{r.WorkflowID, r.Event}
-		cur, seen := best[k]
-		switch {
-		case !seen:
-		case r.Number > cur.Number:
-		case r.Number == cur.Number && r.Created > cur.Created:
-		default:
-			continue
-		}
-		best[k] = r
-	}
-	out := make([]wfrun, 0, len(best))
-	for _, r := range best {
-		out = append(out, r)
-	}
-	// Deterministic order, so a report reads the same twice.
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
-		}
-		return out[i].Event < out[j].Event
-	})
-	return out
-}
+var (
+	// latestRuns keeps the most recent run of each (workflow, event).
+	latestRuns = judge.LatestRuns
+	// runEntries renders workflow runs as check entries.
+	runEntries = judge.RunEntries
+	// ok reports whether a finished check's answer is one to accept.
+	ok = judge.Ok
+	// trim keeps the first n elements and marks the cut.
+	trim = judge.Trim
+	// tally counts the conclusions.
+	tally = judge.Tally
+)
 
 // runsReply is the shape of actions/runs.
 type runsReply struct {
 	Runs []wfrun `json:"workflow_runs"`
-}
-
-// runEntries renders workflow runs as check entries, so ONE set of rules
-// judges both. The suffix keeps them apart in a report: "pages (workflow
-// run)" and a check named "pages" are different objects and a reader chasing
-// the red one needs to know which.
-//
-// ⛔ Upper-cased, because entry.done() tests the GraphQL spelling COMPLETED
-// while REST answers "completed". Left as REST spells it, a finished run
-// would never look done and the wait would run to its timeout — the mirror
-// image of the defect this file exists for.
-func runEntries(rs []wfrun) []entry {
-	es := make([]entry, 0, len(rs))
-	for _, r := range rs {
-		name := r.Name
-		if name == "" {
-			name = "(unnamed)"
-		}
-		kind := "workflow"
-		if r.Event != "" {
-			// The EVENT is part of the identity: two runs of one workflow on
-			// one commit, from different events, are different answers, and a
-			// report that calls them both "pages (workflow run)" cannot say
-			// which one is red.
-			kind = r.Event
-		}
-		es = append(es, entry{
-			Typename:   "WorkflowRun",
-			Name:       name + " (" + kind + " run)",
-			Status:     strings.ToUpper(r.Status),
-			Conclusion: strings.ToUpper(r.Conclusion),
-		})
-	}
-	return es
 }
 
 // rerunWindow is how long GitHub lets a workflow run be re-run. Past it,
@@ -440,21 +318,6 @@ const (
 	failed
 )
 
-// ok reports whether a finished check's answer is one to accept.
-//
-// NEUTRAL and SKIPPED are passes: a lane that excluded itself did its job.
-// CANCELLED is NOT — a cancelled lane ran nothing, and in this fleet that
-// happens through concurrency starvation, which is precisely the case where
-// a green summary would be a lie.
-func ok(result string) bool {
-	switch result {
-	case "SUCCESS", "NEUTRAL", "SKIPPED":
-		return true
-	default:
-		return false
-	}
-}
-
 // assess decides, from one observation, whether to stop and with what.
 //
 // It never networks and never sleeps, so every rule below is testable
@@ -499,7 +362,7 @@ func assess(p pr, minChecks int) (verdict, string) {
 		// can do that.
 		done := 0
 		for _, e := range p.Rollup {
-			if e.done() {
+			if e.Done() {
 				done++
 			}
 		}
@@ -520,8 +383,8 @@ func assess(p pr, minChecks int) (verdict, string) {
 
 	var pending []string
 	for _, e := range judged {
-		if !e.done() {
-			pending = append(pending, e.label())
+		if !e.Done() {
+			pending = append(pending, e.Label())
 		}
 	}
 	if len(pending) > 0 {
@@ -529,8 +392,8 @@ func assess(p pr, minChecks int) (verdict, string) {
 	}
 	var bad []string
 	for _, e := range judged {
-		if !ok(e.result()) {
-			bad = append(bad, fmt.Sprintf("%s=%s", e.label(), e.result()))
+		if !ok(e.Result()) {
+			bad = append(bad, fmt.Sprintf("%s=%s", e.Label(), e.Result()))
 		}
 	}
 	if len(bad) > 0 {
@@ -543,32 +406,6 @@ func assess(p pr, minChecks int) (verdict, string) {
 		return waiting, "checks green, mergeability not computed yet"
 	}
 	return passed, tally(judged)
-}
-
-func trim(s []string, n int) []string {
-	if len(s) <= n {
-		return s
-	}
-	return append(s[:n:n], "…")
-}
-
-// tally counts the conclusions, so a pass says what it passed on rather
-// than merely saying "ok".
-func tally(es []entry) string {
-	n := map[string]int{}
-	for _, e := range es {
-		n[e.result()]++
-	}
-	keys := make([]string, 0, len(n))
-	for k := range n {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf("%s:%d", k, n[k]))
-	}
-	return strings.Join(parts, " ")
 }
 
 // ref is OWNER/REPO#NUMBER, or a bare number resolved against -repo.
